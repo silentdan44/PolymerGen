@@ -1,0 +1,28 @@
+# pyproject.toml
+[project]
+name = "polymer-generator"
+version = "0.1.0"
+description = "Simple polymer chain generator using OpenFF and OpenMM"
+requires-python = ">=3.9"
+
+dependencies = [
+    "openff-toolkit>=0.15.0",      
+    "openff-units>=0.2.0",         
+    "openff-utilities>=0.1.10",    
+    "openmm>=8.0",                 
+    "openmmforcefields>=0.12.0",   
+    "rdkit>=2023.03",              
+    "numpy>=1.21",
+    "scipy>=1.7",
+    "tqdm>=4.62",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
