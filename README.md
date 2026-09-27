@@ -85,7 +85,7 @@ polymerizer = Polymerizer.from_smiles(
     count=20,
     config=BuildConfig(dist_min=1.8, retry=100, rollback=5),
     optimizer='mmff',
-    optimizer_options={'max_iters': 100},
+    optimizer_options={'max_iters': 1000},
     seed=7,
 )
 result = polymerizer.build()
@@ -106,6 +106,159 @@ topology = pack_chains(chains, density=0.3)
 ```
 
 Use `PackmolPacker` directly when you need to configure retry count or tolerance.
+
+## API Reference
+
+This section documents the public entry points and their return values. Distances are in ångströms unless a parameter says otherwise.
+
+### `build_polymer`
+
+```python
+build_polymer(smiles, units, *, optimizer='mmff', optimizer_options=None,
+              config=None, seed=None)
+```
+
+Build a chain from one repeat-unit SMILES. The SMILES must contain exactly two `*` atoms for head and tail connection points. `units` is the number of repeat units, including both ends of the chain.
+
+| Argument | Meaning |
+| --- | --- |
+| `smiles` | Monomer SMILES with two `*` connection points. |
+| `units` | Positive number of repeat units. |
+| `optimizer` | `'mmff'` by default; use `'openff'`, an optimizer object, or `None` to skip optimization. |
+| `optimizer_options` | Keyword arguments for a named optimizer, e.g. `{'max_iters': 1000}`. Must be a dictionary and requires a string optimizer name. |
+| `config` | Optional `BuildConfig` for geometry and retry settings. |
+| `seed` | Integer seed for both the initial conformer and random growth rotations; RDKit accepts 0 through 2³¹−1. |
+
+Returns `BuildResult`. Invalid SMILES, linkers, unit counts, or options raise exceptions. Exhausting retries returns a result with `success == False` and a `failure_reason`.
+
+```python
+from polymer_lib import build_polymer
+
+result = build_polymer(
+    '*CC(c1ccccc1)*', units=12,
+    optimizer='mmff', optimizer_options={'max_iters': 1000}, seed=2026,
+)
+if result.success:
+    polymer = result.molecule  # RDKit Mol with a 3D conformer
+else:
+    print(result.failure_reason)
+```
+
+Set `optimizer=None` to assemble and validate coordinates without force-field minimization. This is faster, but it does not relax the geometry energetically.
+
+### `BuildResult`
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `molecule` | RDKit `Mol` or `None` | Built chain with 3D coordinates, or `None` after retry exhaustion. |
+| `success` | `bool` property | True when `molecule` is present. |
+| `attempts` | `int` | Number of candidate connections tried across the run. |
+| `rollbacks` | `int` | Number of rollback/restart events. |
+| `elapsed_seconds` | `float` | Wall-clock build time. |
+| `failure_reason` | `str` or `None` | Failure summary, or `None` on success. |
+
+Pass `result.molecule`, not the `BuildResult` itself, to RDKit, OpenFF, or packing functions.
+
+### `BuildConfig`
+
+Every field is optional. These are the defaults:
+
+| Field | Default | Meaning |
+| --- | ---: | --- |
+| `bond_length` | `1.5` | Target length of each new inter-unit bond. |
+| `dihedral` | `π` radians | Target torsion when `random_rot=False`. |
+| `random_rot` | `True` | Pick random torsions during growth. |
+| `dist_min` | `1.8` | Minimum distance for nonbonded heavy-atom pairs; pairs within three covalent bonds are excluded. |
+| `retry` | `100` | Additional full-chain retry/rollback cycles after the first attempt. |
+| `rollback` | `5` | Successful growth steps to undo after a failed step. |
+| `retry_step` | `200` | Candidate connections allowed at each step. |
+| `check_bond_length` | `True` | Apply the built-in bond-length sanity check after each candidate. |
+
+```python
+from polymer_lib import BuildConfig, build_polymer
+
+config = BuildConfig(
+    bond_length=1.5, dihedral=3.141592653589793,
+    random_rot=True, dist_min=1.8,
+    retry=100, rollback=5, retry_step=200,
+    check_bond_length=True,
+)
+result = build_polymer('*CC(c1ccccc1)*', units=12, config=config, seed=7)
+```
+
+When `config` is supplied to `Polymerizer`, its fields take precedence over individual geometry/retry keyword arguments.
+
+### `Monomer`
+
+```python
+Monomer(smiles, seed=None)
+monomer.copy()
+```
+
+`Monomer` parses the SMILES, adds explicit hydrogens, generates an ETKDGv3 conformer, and validates that exactly two connection atoms are present. `seed` reproduces this conformer. `copy()` returns an independent molecule for a repeated-unit list.
+
+```python
+from polymer_lib import Monomer, Polymerizer
+
+unit = Monomer('*CC(c1ccccc1)*', seed=7)
+units = [unit.copy() for _ in range(12)]
+result = Polymerizer(units, optimizer='mmff', seed=7).build()
+```
+
+For a prebuilt monomer list, `Polymerizer.seed` controls growth rotations but does not regenerate the supplied coordinates. Use `build_polymer()` or `Polymerizer.from_smiles()` for a seeded end-to-end run.
+
+### `Polymerizer`
+
+Use `Polymerizer` when repeat units differ, monomers are already constructed, or you need direct control of the build.
+
+```python
+Polymerizer(
+    monomers, bond_length=1.5, dihedral=3.141592653589793,
+    random_rot=True, dist_min=1.8, retry=100, rollback=5,
+    retry_step=200, check_bond_length=True,
+    optimizer=None, optimizer_options=None, config=None, seed=None,
+)
+```
+
+`monomers` is a nonempty list of `Monomer` objects in chain order. The class defaults to `optimizer=None`; `build_polymer()` instead defaults to MMFF. `Polymerizer.from_smiles(smiles, count, **kwargs)` is a classmethod shortcut when every repeat unit uses the same SMILES. `build()` returns `BuildResult`; `build_mol()` returns the older RDKit `Mol`-or-`None` value for compatibility.
+
+### Optimizers
+
+- **MMFF94s:** `optimizer='mmff'`. Defaults: `max_iters=1000`, `variant='MMFF94s'`, `non_bonded_thresh=3.0 Å`. Example options: `optimizer_options={'max_iters': 1500, 'variant': 'MMFF94'}`. Nonconvergence rejects that candidate and invokes retry logic.
+- **OpenFF:** `optimizer='openff'` or an `OpenFFOptimizer` object. Constructor defaults: `forcefield='openff-2.1.0.offxml'`, `max_iters=50`, platform `CPU`, tolerance `10.0 kJ/(mol·nm)`, and the installed default NAGL charge model. Install the full environment to use it.
+- **None:** assemble and validate coordinates without energy minimization.
+
+You can pass a configured optimizer instance instead of a string:
+
+```python
+from polymer_lib import MMFFOptimizer, Polymerizer
+
+result = Polymerizer(monomers, optimizer=MMFFOptimizer(max_iters=1000)).build()
+```
+
+### Packing
+
+`pack_chains(chains, density=0.3, max_attempts=5, tolerance=2.0)` is the convenience wrapper. It takes a nonempty list of RDKit molecules and returns an OpenFF `Topology` with periodic box vectors.
+
+```python
+from polymer_lib.packer import pack_chains
+
+chains = [item.molecule for item in successful_results]
+topology = pack_chains(chains, density=0.3)
+```
+
+For direct control, use `PackmolPacker(density=0.3, max_attempts=5, tolerance=2.0).pack(chains)`. Density is in g/mL; tolerance is in Å. Packing requires the OpenFF/Interchange/Packmol dependencies in the full environment.
+
+### Test suite
+
+From the repository root, activate the development environment and run:
+
+```bash
+micromamba activate polymer-generator
+python -m pytest -q
+```
+
+The current tests cover connectivity, RDKit sanitization, bond-length bounds, the exact requested length of a new inter-unit bond, nonbonded heavy-atom distances for chains up to 20 units, mixed monomer sizes, seeded reproducibility, and MMFF optimization on a two-unit chain. The 20-unit check skips energy minimization; the MMFF test covers a short chain. These are structural regression checks, not a validation of polymer thermodynamics or application-specific simulation results.
 
 ### Advanced: build a single polymer chain
 ```python
