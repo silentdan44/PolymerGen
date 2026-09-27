@@ -148,18 +148,34 @@ else:
     print(result.failure_reason)
 ```
 
-To request a stereoregular chain or choose its approximate atom count:
+Choose a standard tacticity with a string. `isotactic` repeats the local configuration, while `syndiotactic` alternates it:
 
 ```python
-isotactic = build_polymer(
+isotactic_chain = build_polymer(
     '*CC(c1ccccc1)*', units=20, tacticity='isotactic', seed=7,
 )
-about_100_atoms = build_polymer(
+syndiotactic_chain = build_polymer(
+    '*CC(c1ccccc1)*', units=20, tacticity='syndiotactic', seed=7,
+)
+approximately_100_atoms = build_polymer(
     '*CC(c1ccccc1)*', target_atoms=100, tacticity='syndiotactic', seed=7,
 )
 ```
 
-`isotactic` repeats one local configuration; `syndiotactic` alternates it. A sequence sets the choice independently for each polymerization center. `+` uses the marked atom's specified configuration from the monomer when present; otherwise the builder chooses a reproducible reference orientation. `-` inverts that reference. The builder embeds private copies of the monomers with these configurations and derives molecular stereochemistry from the resulting 3D coordinates. A sequence must have one entry per inter-unit connection. Tacticity is independent of torsion angles. `atactic` does not impose a configuration pattern. Other stereocenters in the monomer are not selected as tacticity centers.
+To set each polymerization center individually, pass a sequence with one entry per inter-unit connection. `+` uses the selected atom's reference configuration; `-` inverts it. Lists, tuples, and NumPy arrays are accepted:
+
+```python
+from polymer_lib import build_polymer
+
+custom_pattern = build_polymer(
+    '*CC(c1ccccc1)*',
+    units=4,
+    tacticity=['+', '-', '+'],  # one sign for each of the 3 connections
+    seed=7,
+)
+```
+
+Ordered modes configure private monomer copies before embedding, then set the molecular stereochemistry from the generated 3D coordinates. `atactic` does not impose a pattern. Tacticity controls stereochemistry, independently of the torsion angles.
 
 If the monomer has multiple stereocenters, choose the one that becomes stereogenic during polymerization by its atom index. The default selects the carbon next to the tail linker. Inspect it on `Monomer` or specify it directly:
 
@@ -169,11 +185,30 @@ from polymer_lib import Monomer, Polymerizer
 unit = Monomer('*C[C@H](F)C(c1ccccc1)*', seed=7)
 print(unit.tacticity_center)
 chain = Polymerizer(
-    [unit.copy() for _ in range(20)], tacticity='syndiotactic', seed=7,
+    [unit.copy() for _ in range(20)],
+    tacticity='syndiotactic',
+    tacticity_center=unit.tacticity_center,
+    seed=7,
 ).build()
 ```
 
-For a nonstandard repeat direction, pass `tacticity_center=<monomer atom index>` to `Monomer`, `Polymerizer`, `BuildConfig`, or `build_polymer`.
+The SMILES above also contains a separate stereocenter (`[C@H](F)`). The default tacticity center is next to the tail linker; the fluorinated center is left as specified in the input. For a different repeat direction, pass the intended atom index as `tacticity_center` to `Monomer`, `Polymerizer`, `BuildConfig`, or `build_polymer`.
+
+The same options work through `BuildConfig`:
+
+```python
+from polymer_lib import BuildConfig, Monomer, build_polymer
+
+smiles = '*C[C@H](F)C(c1ccccc1)*'
+unit = Monomer(smiles, seed=7)
+config = BuildConfig(
+    tacticity='syndiotactic',
+    tacticity_center=unit.tacticity_center,
+)
+chain = build_polymer(
+    smiles, units=20, config=config, seed=7,
+)
+```
 
 Set `optimizer=None` to assemble and validate coordinates without force-field minimization. This is faster, but it does not relax the geometry energetically.
 
