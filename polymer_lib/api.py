@@ -170,6 +170,91 @@ def _pack(payload: dict) -> dict:
     }
 
 
+def _build_push_off_pack(payload: dict) -> dict:
+    """Run a complete build -> push-off -> pack workflow in one request."""
+    _validate_keys(payload, {"build", "chain_count", "push_off", "pack"}, "input")
+    build_input = payload.get("build")
+    push_off_options = payload.get("push_off", {})
+    pack_options = payload.get("pack", {})
+    chain_count = payload.get("chain_count", 1)
+    if not isinstance(build_input, dict):
+        raise APIRequestError("INVALID_INPUT", "input.build must be an object")
+    if not isinstance(push_off_options, dict):
+        raise APIRequestError("INVALID_INPUT", "input.push_off must be an object")
+    if not isinstance(pack_options, dict):
+        raise APIRequestError("INVALID_INPUT", "input.pack must be an object")
+    if "molecule" in push_off_options:
+        raise APIRequestError("INVALID_INPUT", "input.push_off must not contain molecule")
+    if "molecules" in pack_options:
+        raise APIRequestError("INVALID_INPUT", "input.pack must not contain molecules")
+    if isinstance(chain_count, bool) or not isinstance(chain_count, int) or chain_count < 1:
+        raise APIRequestError("INVALID_INPUT", "input.chain_count must be a positive integer")
+
+    built = []
+    try:
+        for index in range(chain_count):
+            chain_input = dict(build_input)
+            seed = chain_input.get("seed")
+            if seed is not None and chain_count > 1:
+                if isinstance(seed, bool) or not isinstance(seed, int):
+                    raise APIRequestError("INVALID_INPUT", "input.build.seed must be an integer or null")
+                chain_input["seed"] = (seed + index) % (2**31)
+            built.append(_build(chain_input))
+    except APIRequestError as exc:
+        raise APIRequestError(
+            "PIPELINE_STAGE_FAILED", f"build stage failed: {exc.code}: {exc}"
+        ) from exc
+    except Exception as exc:
+        logging.getLogger(__name__).exception("Unexpected failure in pipeline build stage")
+        raise APIRequestError(
+            "PIPELINE_STAGE_FAILED", "build stage failed: INTERNAL_ERROR; see runner stderr logs"
+        ) from exc
+
+    relaxed = []
+    try:
+        for index, item in enumerate(built):
+            options = dict(push_off_options)
+            seed = options.get("seed")
+            if seed is not None and chain_count > 1:
+                if isinstance(seed, bool) or not isinstance(seed, int):
+                    raise APIRequestError("INVALID_INPUT", "input.push_off.seed must be an integer or null")
+                options["seed"] = (seed + index) % (2**31)
+            relaxed.append(_push_off({"molecule": item["molecule"], **options}))
+    except APIRequestError as exc:
+        raise APIRequestError(
+            "PIPELINE_STAGE_FAILED", f"push_off stage failed: {exc.code}: {exc}"
+        ) from exc
+    except Exception as exc:
+        logging.getLogger(__name__).exception("Unexpected failure in pipeline push_off stage")
+        raise APIRequestError(
+            "PIPELINE_STAGE_FAILED", "push_off stage failed: INTERNAL_ERROR; see runner stderr logs"
+        ) from exc
+
+    try:
+        packed = _pack({
+            "molecules": [item["molecule"] for item in relaxed],
+            **pack_options,
+        })
+    except APIRequestError as exc:
+        raise APIRequestError(
+            "PIPELINE_STAGE_FAILED", f"pack stage failed: {exc.code}: {exc}"
+        ) from exc
+    except Exception as exc:
+        logging.getLogger(__name__).exception("Unexpected failure in pipeline pack stage")
+        raise APIRequestError(
+            "PIPELINE_STAGE_FAILED", "pack stage failed: INTERNAL_ERROR; see runner stderr logs"
+        ) from exc
+
+    return {
+        "build": {
+            "molecules": [item["molecule"] for item in built],
+            "diagnostics": [item["diagnostics"] for item in built],
+        },
+        "push_off": {"molecules": [item["molecule"] for item in relaxed]},
+        "pack": packed,
+    }
+
+
 def handle_request(request: Any) -> dict:
     """Validate and execute one API request, returning a JSON-compatible object."""
     request_id = request.get("request_id") if isinstance(request, dict) else None
@@ -188,9 +273,17 @@ def handle_request(request: Any) -> dict:
         payload = request.get("input")
         if not isinstance(payload, dict):
             raise APIRequestError("INVALID_REQUEST", "input must be a JSON object")
-        handlers = {"build": _build, "push_off": _push_off, "pack": _pack}
+        handlers = {
+            "build": _build,
+            "push_off": _push_off,
+            "pack": _pack,
+            "build_push_off_pack": _build_push_off_pack,
+        }
         if action not in handlers:
-            raise APIRequestError("UNKNOWN_ACTION", "action must be one of: build, push_off, pack")
+            raise APIRequestError(
+                "UNKNOWN_ACTION",
+                "action must be one of: build, push_off, pack, build_push_off_pack",
+            )
         result = handlers[action](payload)
         return {**base, "ok": True, "result": result}
     except APIRequestError as exc:

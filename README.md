@@ -116,8 +116,30 @@ Supported actions:
 | `build` | `smiles` and exactly one of `units` or `target_atoms` | MOL block, atom counts, formula, and build diagnostics |
 | `push_off` | `molecule` (`format: "mol"` or `"sdf"`, with coordinates) | Relaxed MOL block and molecule properties |
 | `pack` | nonempty `molecules` array of coordinate-bearing MOL/SDF objects | OpenFF Topology JSON and PDB text with periodic box |
+| `build_push_off_pack` | nested `build` settings; optional `chain_count`, `push_off`, and `pack` objects | Build and relaxed chain structures plus the packed OpenFF Topology JSON and PDB |
 
 For `push_off`, additional input fields map to the corresponding `push_off_chain` keyword arguments (`steps`, `stages`, `temperature`, `seed`, `soft_minimize`, and others). For `pack`, optional inputs are `density` in g/mL, `max_attempts`, and `tolerance` in Å. A `build` result can be passed to `push_off`; its `result.molecule` value is already in the required MOL object format. A `pack` action takes an array of such molecules.
+
+Use `build_push_off_pack` to run all three stages within one request. `chain_count` defaults to `1`; when multiple chains are requested, provided build and push-off seeds are incremented per chain to generate distinct reproducible trajectories. `push_off` and `pack` are option objects corresponding to the options of the standalone actions. Each stage's outputs are returned under `result.build`, `result.push_off`, and `result.pack`. If a stage fails, the response uses `PIPELINE_STAGE_FAILED` and names the stage in the error message.
+
+```json
+{
+  "api_version": "1.0",
+  "request_id": "full-run-1",
+  "action": "build_push_off_pack",
+  "input": {
+    "build": {
+      "smiles": "*CC(c1ccccc1)*",
+      "units": 8,
+      "optimizer": null,
+      "seed": 7
+    },
+    "chain_count": 4,
+    "push_off": {"steps": 1000, "stages": 10, "seed": 20},
+    "pack": {"density": 0.3, "max_attempts": 5, "tolerance": 2.0}
+  }
+}
+```
 
 Example request stream for a build followed by push-off (each object must be sent on its own line):
 
