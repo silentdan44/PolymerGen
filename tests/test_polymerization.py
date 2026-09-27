@@ -3,7 +3,7 @@ import pytest
 from rdkit import Chem
 from rdkit.Geometry import Point3D
 
-from polymer_lib import Monomer, Polymerizer, build_polymer
+from polymer_lib import BuildConfig, Monomer, Polymerizer, build_polymer
 from polymer_lib.poly import check_3d_bond_length, check_3d_structure_poly, connect_mols
 
 
@@ -104,6 +104,145 @@ def test_one_call_api_seed_reproduces_initial_and_growth_geometry():
         second.molecule.GetConformer().GetPositions(),
         atol=1e-10,
     )
+
+
+@pytest.mark.parametrize(
+    ('tacticity', 'expected'),
+    [
+        ('isotactic', [Chem.ChiralType.CHI_TETRAHEDRAL_CCW] * 3),
+        ('syndiotactic', [
+            Chem.ChiralType.CHI_TETRAHEDRAL_CCW,
+            Chem.ChiralType.CHI_TETRAHEDRAL_CW,
+            Chem.ChiralType.CHI_TETRAHEDRAL_CCW,
+        ]),
+    ],
+)
+def test_tacticity_assigns_expected_backbone_stereochemistry(tacticity, expected):
+    monomer = Monomer(POLYSTYRENE, seed=19)
+    polymerizer = Polymerizer(
+        [monomer.copy() for _ in range(4)],
+        optimizer=None, seed=19, tacticity=tacticity,
+    )
+    result = polymerizer.build()
+    assert result.success, result.failure_reason
+    assert [
+        result.molecule.GetAtomWithIdx(index).GetChiralTag()
+        for index in polymerizer._tacticity_atom_indices(result.molecule)
+    ] == expected
+
+
+def test_tacticity_rejects_repeat_unit_without_identifiable_backbone_centers():
+    with pytest.raises(ValueError, match='not stereogenic'):
+        build_polymer('*CC*', units=3, optimizer=None, seed=19, tacticity='isotactic')
+
+
+def test_config_can_select_tacticity():
+    monomer = Monomer(POLYSTYRENE, seed=19)
+    polymerizer = Polymerizer(
+        [monomer.copy() for _ in range(3)],
+        optimizer=None, seed=19,
+        config=BuildConfig(tacticity='syndiotactic'),
+    )
+    result = polymerizer.build()
+    assert result.success
+    assert [
+        result.molecule.GetAtomWithIdx(index).GetChiralTag()
+        for index in polymerizer._tacticity_atom_indices(result.molecule)
+    ] == [Chem.ChiralType.CHI_TETRAHEDRAL_CCW, Chem.ChiralType.CHI_TETRAHEDRAL_CW]
+
+
+def test_tacticity_accepts_explicit_configuration_sequence():
+    monomer = Monomer(POLYSTYRENE, seed=19)
+    polymerizer = Polymerizer(
+        [monomer.copy() for _ in range(4)], optimizer=None, seed=19,
+        tacticity=['+', '-', '+'],
+    )
+    result = polymerizer.build()
+    assert [
+        result.molecule.GetAtomWithIdx(index).GetChiralTag()
+        for index in polymerizer._tacticity_atom_indices(result.molecule)
+    ] == [
+        Chem.ChiralType.CHI_TETRAHEDRAL_CCW,
+        Chem.ChiralType.CHI_TETRAHEDRAL_CW,
+        Chem.ChiralType.CHI_TETRAHEDRAL_CCW,
+    ]
+
+
+def test_tacticity_accepts_numpy_array_and_tags_match_3d_geometry():
+    monomer = Monomer(POLYSTYRENE, seed=19)
+    tacticity = np.array(['+', '-'], dtype=str)
+    polymerizer = Polymerizer(
+        [monomer.copy() for _ in range(3)],
+        optimizer=None,
+        seed=19,
+        tacticity=tacticity,
+    )
+    result = polymerizer.build()
+    assert result.success, result.failure_reason
+    mol = result.molecule
+    indices = polymerizer._tacticity_atom_indices(mol)
+    graph_tags = [mol.GetAtomWithIdx(i).GetChiralTag() for i in indices]
+    geometry_mol = Chem.Mol(mol)
+    Chem.AssignAtomChiralTagsFromStructure(geometry_mol, replaceExistingTags=True)
+    assert [geometry_mol.GetAtomWithIdx(i).GetChiralTag() for i in indices] == graph_tags
+    assert graph_tags[0] != graph_tags[1]
+
+
+def test_tacticity_sequence_length_must_match_stereocenters():
+    with pytest.raises(ValueError, match='must have 2 entries'):
+        build_polymer(
+            POLYSTYRENE, units=3, optimizer=None, seed=19,
+            tacticity=['+'],
+        )
+
+
+def test_tacticity_targets_marked_backbone_center_and_preserves_side_stereocenters():
+    smiles = '*C[C@H](F)C(c1ccccc1)*'
+    monomer = Monomer(smiles, seed=19)
+    polymerizer = Polymerizer(
+        [monomer.copy() for _ in range(3)],
+        optimizer=None,
+        seed=19,
+        tacticity='syndiotactic',
+        config=BuildConfig(tacticity='syndiotactic', dist_min=1.4),
+    )
+    result = polymerizer.build()
+    assert result.success, result.failure_reason
+    mol = result.molecule
+    marked_indices = polymerizer._tacticity_atom_indices(mol)
+    assert [mol.GetAtomWithIdx(i).GetChiralTag() for i in marked_indices] == [
+        Chem.ChiralType.CHI_TETRAHEDRAL_CCW,
+        Chem.ChiralType.CHI_TETRAHEDRAL_CW,
+    ]
+    Chem.AssignStereochemistry(mol, cleanIt=True, force=True)
+    side_center_codes = [
+        atom.GetProp('_CIPCode')
+        for atom in mol.GetAtoms()
+        if atom.HasProp('_CIPCode')
+        and any(neighbor.GetSymbol() == 'F' for neighbor in atom.GetNeighbors())
+    ]
+    assert side_center_codes == ['S', 'S', 'S']
+
+
+def test_target_atoms_rounds_up_to_whole_repeat_units():
+    result = build_polymer(POLYSTYRENE, target_atoms=20, optimizer=None, seed=19)
+    assert result.success, result.failure_reason
+    assert result.molecule.GetNumAtoms() == 34
+
+
+@pytest.mark.parametrize(
+    'kwargs',
+    [
+        pytest.param({}, id='neither'),
+        pytest.param({'units': 2, 'target_atoms': 20}, id='both-values'),
+        pytest.param({'units': None, 'target_atoms': 20}, id='both-names'),
+    ],
+)
+def test_build_polymer_requires_exactly_one_chain_length_mode(kwargs):
+    with pytest.raises(ValueError):
+        build_polymer(
+            POLYSTYRENE, optimizer=None, seed=19, **kwargs,
+        )
 
 
 @pytest.mark.parametrize('pattern', ['small-large-small', 'large-small-large'])

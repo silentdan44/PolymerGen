@@ -114,16 +114,20 @@ This section documents the public entry points and their return values. Distance
 ### `build_polymer`
 
 ```python
-build_polymer(smiles, units, *, optimizer='mmff', optimizer_options=None,
-              config=None, seed=None)
+build_polymer(smiles, units=None, *, target_atoms=None, tacticity='atactic',
+              tacticity_center=None,
+              optimizer='mmff', optimizer_options=None, config=None, seed=None)
 ```
 
-Build a chain from one repeat-unit SMILES. The SMILES must contain exactly two `*` atoms for head and tail connection points. `units` is the number of repeat units, including both ends of the chain.
+Build a chain from one repeat-unit SMILES. The SMILES must contain exactly two `*` atoms for head and tail connection points. Specify either `units` (the repeat-unit count) or `target_atoms` (an approximate final atom count); target counts are rounded up to a whole number of repeat units.
 
 | Argument | Meaning |
 | --- | --- |
 | `smiles` | Monomer SMILES with two `*` connection points. |
 | `units` | Positive number of repeat units. |
+| `target_atoms` | Approximate desired atom count in the output RDKit molecule, including explicit hydrogens. The repeat count is rounded up; actual count can exceed the target by up to one repeat unit's atom contribution. Specify instead of `units`. |
+| `tacticity` | `'atactic'` (default), `'isotactic'`, `'syndiotactic'`, or a sequence such as `['+', '-']`. A sequence needs one entry per polymerization stereocenter. `+` preserves the selected atom's reference configuration; `-` inverts it. |
+| `tacticity_center` | Optional atom index in the monomer that becomes the stereocenter at polymerization. Defaults to the atom next to the tail connection point. |
 | `optimizer` | `'mmff'` by default; use `'openff'`, an optimizer object, or `None` to skip optimization. |
 | `optimizer_options` | Keyword arguments for a named optimizer, e.g. `{'max_iters': 1000}`. Must be a dictionary and requires a string optimizer name. |
 | `config` | Optional `BuildConfig` for geometry and retry settings. |
@@ -143,6 +147,33 @@ if result.success:
 else:
     print(result.failure_reason)
 ```
+
+To request a stereoregular chain or choose its approximate atom count:
+
+```python
+isotactic = build_polymer(
+    '*CC(c1ccccc1)*', units=20, tacticity='isotactic', seed=7,
+)
+about_100_atoms = build_polymer(
+    '*CC(c1ccccc1)*', target_atoms=100, tacticity='syndiotactic', seed=7,
+)
+```
+
+`isotactic` repeats one local configuration; `syndiotactic` alternates it. A sequence sets the choice independently for each polymerization center. `+` uses the marked atom's specified configuration from the monomer when present; otherwise the builder chooses a reproducible reference orientation. `-` inverts that reference. The builder embeds private copies of the monomers with these configurations and derives molecular stereochemistry from the resulting 3D coordinates. A sequence must have one entry per inter-unit connection. Tacticity is independent of torsion angles. `atactic` does not impose a configuration pattern. Other stereocenters in the monomer are not selected as tacticity centers.
+
+If the monomer has multiple stereocenters, choose the one that becomes stereogenic during polymerization by its atom index. The default selects the carbon next to the tail linker. Inspect it on `Monomer` or specify it directly:
+
+```python
+from polymer_lib import Monomer, Polymerizer
+
+unit = Monomer('*C[C@H](F)C(c1ccccc1)*', seed=7)
+print(unit.tacticity_center)
+chain = Polymerizer(
+    [unit.copy() for _ in range(20)], tacticity='syndiotactic', seed=7,
+).build()
+```
+
+For a nonstandard repeat direction, pass `tacticity_center=<monomer atom index>` to `Monomer`, `Polymerizer`, `BuildConfig`, or `build_polymer`.
 
 Set `optimizer=None` to assemble and validate coordinates without force-field minimization. This is faster, but it does not relax the geometry energetically.
 
@@ -173,6 +204,8 @@ Every field is optional. These are the defaults:
 | `rollback` | `5` | Successful growth steps to undo after a failed step. |
 | `retry_step` | `200` | Candidate connections allowed at each step. |
 | `check_bond_length` | `True` | Apply the built-in bond-length sanity check after each candidate. |
+| `tacticity` | `'atactic'` | Backbone stereochemistry: `'atactic'`, `'isotactic'`, `'syndiotactic'`, or a `+`/`-` sequence. |
+| `tacticity_center` | `None` | Monomer atom index for the polymerization stereocenter; defaults to the atom next to the tail linker. |
 
 ```python
 from polymer_lib import BuildConfig, build_polymer
@@ -191,7 +224,7 @@ When `config` is supplied to `Polymerizer`, its fields take precedence over indi
 ### `Monomer`
 
 ```python
-Monomer(smiles, seed=None)
+Monomer(smiles, seed=None, tacticity_center=None)
 monomer.copy()
 ```
 
@@ -205,7 +238,7 @@ units = [unit.copy() for _ in range(12)]
 result = Polymerizer(units, optimizer='mmff', seed=7).build()
 ```
 
-For a prebuilt monomer list, `Polymerizer.seed` controls growth rotations but does not regenerate the supplied coordinates. Use `build_polymer()` or `Polymerizer.from_smiles()` for a seeded end-to-end run.
+For a prebuilt monomer list, `Polymerizer.seed` controls growth rotations but does not regenerate supplied coordinates in atactic mode. Ordered tacticity modes re-embed private copies of the monomers so the requested stereochemistry matches their 3D coordinates.
 
 ### `Polymerizer`
 
@@ -217,6 +250,7 @@ Polymerizer(
     random_rot=True, dist_min=1.8, retry=100, rollback=5,
     retry_step=200, check_bond_length=True,
     optimizer=None, optimizer_options=None, config=None, seed=None,
+    tacticity='atactic', tacticity_center=None,
 )
 ```
 
