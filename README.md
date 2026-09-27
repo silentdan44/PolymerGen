@@ -50,6 +50,7 @@ micromamba run -n polymer-generator python -m pip install "git+https://github.co
 ```bash
 micromamba create -f environment-openff.yml
 micromamba activate polymer-generator-openff
+python -m pip install --no-deps --editable .
 python -c "from polymer_lib import Monomer, Polymerizer, OpenFFOptimizer; from polymer_lib.packer import PackmolPacker; print('full environment is ready')"
 ```
 
@@ -59,18 +60,73 @@ Run the geometry and polymerization checks with `python -m pytest`.
 
 ### Docker
 
-The Docker image uses `environment-openff.yml`, including OpenFF, OpenMM, NAGL, Packmol, and the test dependencies. Build and run the full test suite with:
+The Docker image uses `environment-openff.yml`, including OpenFF, OpenMM, NAGL, Packmol, and the test dependencies. Build the image and run its JSON Lines API:
 
 ```bash
 docker build -t polymer-generator-openff .
-docker run --rm polymer-generator-openff
+echo '{"api_version":"1.0","request_id":"demo-1","action":"build","input":{"smiles":"*CC(c1ccccc1)*","units":3,"seed":7}}' | docker run --rm -i polymer-generator-openff
 ```
 
-The image's default command is `python -m pytest -q`. To run another command in the prepared environment, pass it after the image name, for example:
+The runner reads one JSON request per line from stdin and writes exactly one JSON response per request to stdout. It stays alive for multiple requests, making it suitable as a container process behind a future MCP adapter. Logs go to stderr. To run the tests or another command in the prepared environment, override the image command:
 
 ```bash
+docker run --rm polymer-generator-openff python -m pytest -q
 docker run --rm polymer-generator-openff python -c "import openmm; print(openmm.__version__)"
 ```
+
+### JSON API and container runner
+
+The API contract is versioned and uses one request and one response per JSONL line. The request envelope is:
+
+```json
+{
+  "api_version": "1.0",
+  "request_id": "job-42",
+  "action": "build",
+  "input": {
+    "smiles": "*CC(c1ccccc1)*",
+    "units": 8,
+    "tacticity": "atactic",
+    "seed": 7
+  }
+}
+```
+
+`request_id` is optional; when provided, it is echoed in the response. The `input` fields depend on `action`; unknown fields are rejected to catch misspellings. Exactly one `units` or `target_atoms` is required for `build`, matching the Python API. `tacticity` accepts `atactic`, `isotactic`, `syndiotactic`, or a `+`/`-` sequence. The optimizer can be `"mmff"`, `"openff"`, or `null`; `optimizer_options` is an object of optimizer-specific options. Optional `config` maps to `BuildConfig` and can set `bond_length`, `dihedral`, `random_rot`, `dist_min`, `retry`, `rollback`, `retry_step`, and `check_bond_length` (as well as `tacticity` and `tacticity_center`).
+
+Successful responses have `ok: true` and a `result`; failures have `ok: false` and a stable `error.code` plus a human-readable `error.message`. Result coordinates are self-contained text payloads, so clients need not share a filesystem with the container.
+
+```json
+{
+  "api_version": "1.0",
+  "request_id": "job-42",
+  "ok": true,
+  "result": {
+    "molecule": {"format": "mol", "data": "... MOL block ..."},
+    "properties": {"atoms": 123, "heavy_atoms": 43, "formula": "C32H48"},
+    "diagnostics": {"attempts": 1, "rollbacks": 0, "elapsed_seconds": 0.3}
+  }
+}
+```
+
+Supported actions:
+
+| Action | Required input | Result |
+| --- | --- | --- |
+| `build` | `smiles` and exactly one of `units` or `target_atoms` | MOL block, atom counts, formula, and build diagnostics |
+| `push_off` | `molecule` (`format: "mol"` or `"sdf"`, with coordinates) | Relaxed MOL block and molecule properties |
+| `pack` | nonempty `molecules` array of coordinate-bearing MOL/SDF objects | OpenFF Topology JSON and PDB text with periodic box |
+
+For `push_off`, additional input fields map to the corresponding `push_off_chain` keyword arguments (`steps`, `stages`, `temperature`, `seed`, `soft_minimize`, and others). For `pack`, optional inputs are `density` in g/mL, `max_attempts`, and `tolerance` in Å. A `build` result can be passed to `push_off`; its `result.molecule` value is already in the required MOL object format. A `pack` action takes an array of such molecules.
+
+Example request stream for a build followed by push-off (each object must be sent on its own line):
+
+```jsonl
+{"api_version":"1.0","request_id":"build-1","action":"build","input":{"smiles":"*CC(c1ccccc1)*","units":4,"optimizer":null,"seed":7}}
+{"api_version":"1.0","request_id":"relax-1","action":"push_off","input":{"molecule":{"format":"mol","data":"... copy result.molecule.data here ..."},"steps":100,"stages":10,"seed":7}}
+```
+
+When the runner is called through Docker, keep stdin open (`-i`) and read stdout line by line. The same protocol can be used over any future transport: decode a request object, call `polymer_lib.api.handle_request`, then encode the response object.
 
 ## Quick Start
 ### Build a chain in one call

@@ -19,5 +19,3 @@ dependencies:
   - packmol
   - pytest>=7
   - pytest-cov>=4
-  - pip:
-      - -e .

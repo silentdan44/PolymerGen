@@ -4,13 +4,15 @@ ARG MAMBA_DOCKERFILE_ACTIVATE=1
 
 WORKDIR /app
 
-# The OpenFF environment file installs the project in editable mode, so the
-# source tree must be present before creating the environment.
+COPY --chown=$MAMBA_USER:$MAMBA_USER environment-openff.yml /tmp/environment-openff.yml
+
+RUN micromamba env create --yes --file /tmp/environment-openff.yml \
+    && micromamba clean --all --yes
+
 COPY --chown=$MAMBA_USER:$MAMBA_USER . /app
 
-RUN micromamba env create --yes --file environment-openff.yml \
-    && micromamba clean --all --yes
+RUN micromamba run -n polymer-generator-openff python -m pip install --no-deps --editable /app
 
 ENV ENV_NAME=polymer-generator-openff
 
-CMD ["python", "-m", "pytest", "-q"]
+CMD ["python", "-m", "polymer_lib.runner"]
