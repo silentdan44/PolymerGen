@@ -175,6 +175,8 @@ class Polymerizer:
 
         poly_mol = utils.deepcopy_mol(self.monomers[0].mol)
         poly_history = [utils.deepcopy_mol(poly_mol)]
+        history_start_step = 0
+        history_limit = self.rollback + 1
 
         total_attempts = 0
         total_rollbacks = 0
@@ -245,6 +247,9 @@ class Polymerizer:
                     if check:
                         poly_mol = poly_trial
                         poly_history.append(utils.deepcopy_mol(poly_mol))
+                        if len(poly_history) > history_limit:
+                            poly_history.pop(0)
+                            history_start_step += 1
                         success = True
 
                         # Log progress at ~10% intervals (or every step for short chains)
@@ -278,16 +283,17 @@ class Polymerizer:
                 retries_left -= 1
                 total_rollbacks += 1
                 self._last_rollbacks += 1
-                rollback_steps = min(self.rollback, len(poly_history) - 1)
-                start_step = max(0, step - rollback_steps)
+                rollback_steps = min(self.rollback, step - history_start_step)
+                start_step = step - rollback_steps
+                history_index = start_step - history_start_step
 
                 logger.info(
                     f'Rollback {rollback_steps} steps -> step {start_step+1}. '
                     f'Retries left: {retries_left}'
                 )
 
-                poly_mol = utils.deepcopy_mol(poly_history[start_step])
-                poly_history = poly_history[:start_step + 1]
+                poly_mol = utils.deepcopy_mol(poly_history[history_index])
+                poly_history = poly_history[:history_index + 1]
 
         elapsed = time.time() - t0
         if poly_mol is not None:

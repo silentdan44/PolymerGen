@@ -1,9 +1,10 @@
 import numpy as np
 import pytest
 from rdkit import Chem
+from rdkit.Geometry import Point3D
 
 from polymer_lib import Monomer, Polymerizer, build_polymer
-from polymer_lib.poly import connect_mols
+from polymer_lib.poly import check_3d_bond_length, check_3d_structure_poly, connect_mols
 
 
 POLYSTYRENE = '*CC(c1ccccc1)*'
@@ -147,3 +148,32 @@ def test_new_interunit_bond_matches_requested_length():
     atom_b = first.GetNumAtoms() - 1 + head_neighbor - (head_neighbor > head)
     coords = np.asarray(result.GetConformer().GetPositions())
     assert np.linalg.norm(coords[atom_a] - coords[atom_b]) == pytest.approx(1.5, abs=1e-8)
+
+
+def test_bond_length_check_uses_bond_vectors_and_detects_stretching():
+    mol = Monomer(POLYSTYRENE, seed=19).mol
+    assert check_3d_bond_length(mol)
+    conf = mol.GetConformer()
+    bond = mol.GetBondWithIdx(0)
+    atom_idx = bond.GetEndAtomIdx()
+    old = conf.GetAtomPosition(atom_idx)
+    conf.SetAtomPosition(atom_idx, Point3D(old.x + 10.0, old.y, old.z))
+    assert not check_3d_bond_length(mol)
+
+
+def test_sparse_contact_check_matches_expected_for_large_graph():
+    atom_count = 600
+    editable = Chem.RWMol()
+    for _ in range(atom_count):
+        editable.AddAtom(Chem.Atom('C'))
+    for idx in range(atom_count - 1):
+        editable.AddBond(idx, idx + 1, Chem.BondType.SINGLE)
+    mol = editable.GetMol()
+    conformer = Chem.Conformer(atom_count)
+    for idx in range(atom_count):
+        conformer.SetAtomPosition(idx, Point3D(idx * 3.0, 0.0, 0.0))
+    mol.AddConformer(conformer)
+
+    assert check_3d_structure_poly(mol, mol, dist_min=1.8)
+    mol.GetConformer().SetAtomPosition(atom_count - 1, Point3D(0.0, 0.0, 0.0))
+    assert not check_3d_structure_poly(mol, mol, dist_min=1.8)

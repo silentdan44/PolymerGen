@@ -6,9 +6,34 @@ Based on RadonPy 0.2.9
 import numpy as np
 from rdkit import Chem
 from rdkit import Geometry as Geom
+from scipy.spatial import cKDTree
 from . import calc
 from . import utils
 from .utils import logger
+
+
+_DENSE_CONTACT_CHECK_LIMIT = 500
+
+
+def _within_bond_distance(adjacency, start, target, max_distance):
+    """Return whether two atoms are connected by at most max_distance bonds."""
+    if start == target:
+        return True
+    seen = {start}
+    frontier = {start}
+    for _ in range(max_distance):
+        next_frontier = set()
+        for atom_idx in frontier:
+            for neighbor in adjacency[atom_idx]:
+                if neighbor == target:
+                    return True
+                if neighbor not in seen:
+                    seen.add(neighbor)
+                    next_frontier.add(neighbor)
+        frontier = next_frontier
+        if not frontier:
+            break
+    return False
 
 
 def set_linker_flag(mol, reverse=False, label=1):
@@ -220,24 +245,20 @@ def check_3d_proximity(coord1, coord2=None, dist_min=1.8, ignore_rad=3, dmat=Non
 
 def check_3d_bond_length(mol, confId=0, bond_s=2.7, bond_a=1.9, bond_d=1.8, bond_t=1.4):
     coord = np.array(mol.GetConformer(confId).GetPositions())
-    dist_matrix = calc.distance_matrix(coord)
-    check = True
+    bonds = list(mol.GetBonds())
+    if not bonds:
+        return True
+    begin = np.fromiter((b.GetBeginAtomIdx() for b in bonds), dtype=np.intp)
+    end = np.fromiter((b.GetEndAtomIdx() for b in bonds), dtype=np.intp)
+    orders = np.fromiter((b.GetBondTypeAsDouble() for b in bonds), dtype=float)
+    lengths = np.linalg.norm(coord[begin] - coord[end], axis=1)
 
-    for b in mol.GetBonds():
-        bond_l = dist_matrix[b.GetBeginAtom().GetIdx(), b.GetEndAtom().GetIdx()]
-        if b.GetBondTypeAsDouble() == 1.0 and bond_l > bond_s:
-            check = False
-            break
-        elif b.GetBondTypeAsDouble() == 1.5 and bond_l > bond_a:
-            check = False
-            break
-        elif b.GetBondTypeAsDouble() == 2.0 and bond_l > bond_d:
-            check = False
-            break
-        elif b.GetBondTypeAsDouble() == 3.0 and bond_l > bond_t:
-            check = False
-            break
-    return check
+    limits = np.select(
+        [orders == 1.0, orders == 1.5, orders == 2.0, orders == 3.0],
+        [bond_s, bond_a, bond_d, bond_t],
+        default=np.inf,
+    )
+    return bool(np.all(lengths <= limits))
 
 
 def check_3d_structure_poly(poly, mon, poly_dmat=None, dist_min=1.8, ignore_rad=3,
@@ -265,25 +286,30 @@ def check_3d_structure_poly(poly, mon, poly_dmat=None, dist_min=1.8, ignore_rad=
         atom.GetIdx() for atom in poly.GetAtoms() if atom.GetSymbol() != 'H'
     ]
     heavy_coord = coord[heavy_indices]
-    distances = calc.distance_matrix(heavy_coord)
-    heavy_to_row = {atom_idx: row for row, atom_idx in enumerate(heavy_indices)}
-    for atom_idx, i in heavy_to_row.items():
-        seen = {atom_idx: 0}
-        frontier = {atom_idx}
-        for _ in range(ignore_rad):
-            next_frontier = set()
-            for atom_idx in frontier:
-                for neighbor in adjacency[atom_idx]:
-                    if neighbor not in seen:
-                        seen[neighbor] = seen[atom_idx] + 1
-                        next_frontier.add(neighbor)
-            frontier = next_frontier
-        for j in seen:
-            if j in heavy_to_row:
-                distances[i, heavy_to_row[j]] = np.inf
+    if len(heavy_indices) < 2:
+        check = True
+        return check_3d_bond_length(poly) if check_bond_length else check
 
-    nonbonded = distances[np.isfinite(distances)]
-    check = bool(nonbonded.size == 0 or np.all(nonbonded > dist_min))
+    if len(heavy_indices) <= _DENSE_CONTACT_CHECK_LIMIT:
+        # For small molecules, scipy's dense cdist has lower overhead than
+        # building a spatial tree. Keep the sparse search for longer chains.
+        distances = calc.distance_matrix(heavy_coord)
+        close_pairs = np.argwhere(np.triu(distances <= dist_min, k=1))
+    else:
+        # Query only pairs that could violate the cutoff instead of allocating
+        # a dense N-by-N distance matrix for long chains.
+        close_pairs = cKDTree(heavy_coord).query_pairs(
+            dist_min, output_type='ndarray'
+        )
+    check = all(
+        _within_bond_distance(
+            adjacency,
+            heavy_indices[int(pair[0])],
+            heavy_indices[int(pair[1])],
+            ignore_rad,
+        )
+        for pair in close_pairs
+    )
 
     # Bond lengths are validated on the whole current chain as well.
     if check and check_bond_length:
