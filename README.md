@@ -17,61 +17,38 @@ A Python library for building 3D polymer structures with automatic retry/rollbac
 
 ## Installation
 
-The recommended setup uses [micromamba](https://mamba.readthedocs.io/en/latest/user_guide/micromamba.html).
-Install micromamba once, then run these commands from the repository root.
-
-### Core package (RDKit and MMFF)
+Docker is the recommended way to run the complete workflow, including OpenFF, OpenMM, push-off, and packing. From the repository root:
 
 ```bash
-micromamba create -f environment.yml
-micromamba activate polymer-generator
-python -c "from polymer_lib import Monomer, Polymerizer; print('polymer_lib is ready')"
+docker build -t polymer-generator .
+echo '{"api_version":"1.0","request_id":"demo-1","action":"build","input":{"smiles":"*CC(c1ccccc1)*","units":3,"seed":7}}' | docker run --rm -i polymer-generator
 ```
 
-The environment file installs the project in editable mode, so code changes are immediately available without reinstalling.
+The container runs the JSON Lines API by default. See [JSON API and container runner](#json-api-and-container-runner) for request formats and actions. To run the test suite in the full environment:
 
-### Install the package from GitHub
+```bash
+docker run --rm polymer-generator python -m pytest -q
+```
 
-After replacing `<github-user>` and `<repository>` with the GitHub owner and repository name, users can install the latest version directly:
+### Install the Python package from GitHub
+
+For Python use outside Docker, replace `<github-user>` and `<repository>` with the GitHub owner and repository name:
 
 ```bash
 python -m pip install "git+https://github.com/<github-user>/<repository>.git"
 ```
 
-For a clean environment with the required scientific dependencies, create the micromamba environment first, then install from GitHub instead of the local checkout:
+This installs the core Python package. The complete OpenFF/OpenMM pipeline is provided by Docker or the full local environment below.
+
+### Local development with the full environment
+
+Install [micromamba](https://mamba.readthedocs.io/en/latest/user_guide/micromamba.html), then run from the repository root:
 
 ```bash
-micromamba create -n polymer-generator -c conda-forge python=3.11 pip rdkit numpy scipy numba tqdm
-micromamba run -n polymer-generator python -m pip install "git+https://github.com/<github-user>/<repository>.git"
-```
-
-### Full environment (OpenFF, NAGL and Packmol)
-
-```bash
-micromamba create -f environment-openff.yml
-micromamba activate polymer-generator-openff
+micromamba create -f environment.yml
+micromamba activate polymer-generator
 python -m pip install --no-deps --editable .
-python -c "from polymer_lib import Monomer, Polymerizer, OpenFFOptimizer; from polymer_lib.packer import PackmolPacker; print('full environment is ready')"
-```
-
-To use only the OpenFF optimizer from an existing core environment, install the optional Python extra with `python -m pip install -e ".[openff]"`; Packmol support is provided by the full environment.
-
-Run the geometry and polymerization checks with `python -m pytest`.
-
-### Docker
-
-The Docker image uses `environment-openff.yml`, including OpenFF, OpenMM, NAGL, Packmol, and the test dependencies. Build the image and run its JSON Lines API:
-
-```bash
-docker build -t polymer-generator-openff .
-echo '{"api_version":"1.0","request_id":"demo-1","action":"build","input":{"smiles":"*CC(c1ccccc1)*","units":3,"seed":7}}' | docker run --rm -i polymer-generator-openff
-```
-
-The runner reads one JSON request per line from stdin and writes exactly one JSON response per request to stdout. It stays alive for multiple requests, making it suitable as a container process behind a future MCP adapter. Logs go to stderr. To run the tests or another command in the prepared environment, override the image command:
-
-```bash
-docker run --rm polymer-generator-openff python -m pytest -q
-docker run --rm polymer-generator-openff python -c "import openmm; print(openmm.__version__)"
+python -m pytest -q
 ```
 
 ## Quick Start

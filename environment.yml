@@ -9,7 +9,13 @@ dependencies:
   - scipy>=1.7
   - numba>=0.57
   - tqdm>=4.62
+  - openff-toolkit>=0.15
+  - openff-units>=0.2
+  - openff-utilities>=0.1.10
+  - openff-interchange>=0.4
+  - openff-nagl
+  - openff-nagl-models
+  - openmm>=8
+  - packmol
   - pytest>=7
   - pytest-cov>=4
-  - pip:
-      - -e .
