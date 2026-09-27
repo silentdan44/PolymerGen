@@ -396,6 +396,105 @@ topology = pack_chains(chains, density=0.3)
 
 For direct control, use `PackmolPacker(density=0.3, max_attempts=5, tolerance=2.0).pack(chains)`. Density is in g/mL; tolerance is in Å. Packing requires the OpenFF/Interchange/Packmol dependencies in the full environment.
 
+### Save a prepared chain for OpenMM MD
+
+`push_off_chain` returns a relaxed RDKit molecule. To continue with a separate OpenMM simulation, parameterize that relaxed geometry into an OpenFF `Interchange`, then save both the portable OpenFF representation and the engine-specific OpenMM files. The example below writes:
+
+| File | Contents |
+| --- | --- |
+| `chain.pdb` | OpenMM topology and starting coordinates. PDB does not store force-field parameters or velocities. |
+| `system.xml` | OpenMM System, including masses, constraints, and force-field terms. |
+| `integrator.xml` | Integrator settings needed to construct the resumed Simulation. |
+| `state.xml` | OpenMM State snapshot, including positions, velocities, and box vectors where present. |
+| `interchange.json` | OpenFF Interchange JSON with chemical topology, force-field parameters, and coordinates. |
+
+This example assigns the same default NAGL model policy used by `push_off_chain` and initializes velocities at 300 K. Replace the force field, charge model, timestep, and temperature with the settings intended for the production run.
+
+```python
+from pathlib import Path
+
+import openmm
+from openmm import unit
+from openmm.app import PDBFile, Simulation
+from openff.interchange import Interchange
+from openff.nagl_models import list_available_nagl_models
+from openff.toolkit import ForceField, Molecule
+from openff.toolkit.utils.toolkits import GLOBAL_TOOLKIT_REGISTRY
+from polymer_lib import build_polymer, push_off_chain
+
+result = build_polymer('*CC(c1ccccc1)*', units=12, optimizer=None, seed=7)
+if not result.success:
+    raise RuntimeError(result.failure_reason)
+
+chain = push_off_chain(result.molecule, seed=7)
+
+# Parameterize the already-relaxed coordinates for the production system.
+try:
+    off_mol = Molecule.from_rdkit(chain)
+except Exception:
+    off_mol = Molecule.from_rdkit(chain, allow_undefined_stereo=True)
+charge_model = list_available_nagl_models()[-1]
+off_mol.assign_partial_charges(
+    partial_charge_method=charge_model,
+    toolkit_registry=GLOBAL_TOOLKIT_REGISTRY,
+)
+forcefield = ForceField('openff-2.1.0.offxml')
+interchange = Interchange.from_smirnoff(
+    force_field=forcefield,
+    topology=[off_mol],
+    charge_from_molecules=[off_mol],
+)
+
+system = interchange.to_openmm_system()
+topology = interchange.to_openmm_topology()
+positions = interchange.positions.to_openmm()
+integrator = openmm.LangevinMiddleIntegrator(
+    300 * unit.kelvin,
+    1 / unit.picosecond,
+    2 * unit.femtoseconds,
+)
+simulation = Simulation(topology, system, integrator)
+simulation.context.setPositions(positions)
+simulation.context.setVelocitiesToTemperature(300 * unit.kelvin, 7)
+
+out = Path('md_start')
+out.mkdir(exist_ok=True)
+with (out / 'system.xml').open('w') as file:
+    file.write(openmm.XmlSerializer.serialize(system))
+with (out / 'integrator.xml').open('w') as file:
+    file.write(openmm.XmlSerializer.serialize(integrator))
+state = simulation.context.getState(getPositions=True, getVelocities=True)
+with (out / 'state.xml').open('w') as file:
+    file.write(openmm.XmlSerializer.serialize(state))
+with (out / 'chain.pdb').open('w') as file:
+    PDBFile.writeFile(topology, positions, file, keepIds=True)
+(out / 'interchange.json').write_text(interchange.model_dump_json(indent=2))
+
+# Optional exact checkpoint. Load only with a compatible OpenMM version,
+# platform, and hardware; unlike state.xml, it also stores RNG internals.
+simulation.saveCheckpoint(str(out / 'checkpoint.chk'))
+```
+
+To resume from the portable XML State, reconstruct the Simulation from the PDB topology, System, and integrator, then load the saved State:
+
+```python
+import openmm
+from openmm.app import PDBFile, Simulation
+
+pdb = PDBFile('md_start/chain.pdb')
+with open('md_start/system.xml') as file:
+    system = openmm.XmlSerializer.deserialize(file.read())
+with open('md_start/integrator.xml') as file:
+    integrator = openmm.XmlSerializer.deserialize(file.read())
+
+simulation = Simulation(pdb.topology, system, integrator)
+simulation.loadState('md_start/state.xml')
+simulation.step(100_000)
+simulation.saveState('md_start/state_after_run.xml')
+```
+
+`state.xml` is the portable restart option: it restores positions and velocities, but not the integrator's random-number generator state, so the continued stochastic trajectory will not be bitwise identical. `checkpoint.chk` stores more internal state and supports exact continuation only with a compatible OpenMM version, platform, and hardware. Keep `system.xml`, `integrator.xml`, and `chain.pdb` together with either restart file. The `interchange.json` can be loaded with `Interchange.model_validate_json(...)`; it preserves the OpenFF representation for inspection or system reconstruction. Interchange JSON compatibility across versions is not guaranteed, so record package versions alongside long-lived simulation inputs.
+
 ### Test suite
 
 From the repository root, activate the development environment and run:
