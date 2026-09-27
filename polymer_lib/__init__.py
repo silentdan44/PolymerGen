@@ -9,6 +9,7 @@ Main entry points:
 
 from .monomer import Monomer
 from .polymerizer import BuildConfig, BuildResult, Polymerizer, build_polymer
+from .push_off import push_off_chain
 from .optimizers import (
     BaseOptimizer,
     MMFFOptimizer,
@@ -26,6 +27,7 @@ __all__ = [
     'BuildConfig',
     'BuildResult',
     'build_polymer',
+    'push_off_chain',
     'BaseOptimizer',
     'MMFFOptimizer',
     'get_optimizer',

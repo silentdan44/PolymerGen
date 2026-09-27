@@ -135,6 +135,25 @@ Build a chain from one repeat-unit SMILES. The SMILES must contain exactly two `
 
 Returns `BuildResult`. Invalid SMILES, linkers, unit counts, or options raise exceptions. Exhausting retries returns a result with `success == False` and a `failure_reason`.
 
+### `push_off_chain`
+
+```python
+push_off_chain(mol, *, forcefield='openff-2.1.0.offxml', steps=1000,
+               stages=10, temperature=300.0, timestep=1.0, friction=1.0,
+               amplitude=25.0, cutoff_scale=1.5, seed=None, platform='CPU',
+               minimize=True, max_iters=200, tolerance=10.0)
+```
+
+Run this after `build_polymer` has assembled the complete chain and before packing. It returns a **copy** of the RDKit molecule with relaxed coordinates; the input object is unchanged. Requires the optional OpenFF/OpenMM/NAGL environment. `steps` and `stages` control the staged soft dynamics; `amplitude` is the maximum soft pair energy in kJ/mol. With `minimize=True`, physical OpenFF interactions are restored and a force-field minimization follows the push-off. Set `minimize=False` to return after the soft dynamics only.
+
+```python
+from polymer_lib import build_polymer, push_off_chain
+
+result = build_polymer('*CC(c1ccccc1)*', units=12, optimizer=None, seed=7)
+if result.success:
+    relaxed_chain = push_off_chain(result.molecule, steps=1000, seed=7)
+```
+
 ```python
 from polymer_lib import build_polymer
 
@@ -296,27 +315,29 @@ Polymerizer(
 - **MMFF94s:** `optimizer='mmff'`. Defaults: `max_iters=1000`, `variant='MMFF94s'`, `non_bonded_thresh=3.0 Å`. Example options: `optimizer_options={'max_iters': 1500, 'variant': 'MMFF94'}`. Nonconvergence rejects that candidate and invokes retry logic.
 - **OpenFF:** `optimizer='openff'` or an `OpenFFOptimizer` object. Constructor defaults: `forcefield='openff-2.1.0.offxml'`, `max_iters=50`, platform `CPU`, tolerance `10.0 kJ/(mol·nm)`, and the installed default NAGL charge model. Install the full environment to use it.
 
-OpenFF can optionally run an OpenMM soft push-off before minimization. It retains bonded forces, temporarily replaces the physical Lennard-Jones and electrostatic terms with a finite cosine repulsion, and raises that repulsion over short Langevin-dynamics stages. Then it restores the original force-field interactions and runs the standard minimizer. The push-off is disabled by default (`push_off_steps=0`); enable it with a positive step count:
+For a completed chain, run a separate OpenMM soft push-off stage before passing it to packing. Build without a per-connection optimizer (`optimizer=None`), then pass the resulting molecule to `push_off_chain`. The function copies the molecule, retains bonded forces, temporarily replaces physical Lennard-Jones and electrostatic interactions with a finite cosine repulsion, and raises that repulsion over short Langevin-dynamics stages. By default, it restores the physical force field and minimizes the chain after the soft dynamics. See [`push_off_chain`](#push_off_chain) for all options.
 
 ```python
-from polymer_lib import build_polymer
+from polymer_lib import build_polymer, push_off_chain
 
 result = build_polymer(
     '*CC(c1ccccc1)*',
     units=12,
-    optimizer='openff',
-    optimizer_options={
-        'push_off_steps': 1000,
-        'push_off_stages': 10,
-        'push_off_amplitude': 25.0,  # kJ/mol maximum per overlapping pair
-        'push_off_temperature': 300.0,  # K
-        'push_off_seed': 7,
-    },
+    optimizer=None,
     seed=7,
 )
+chain = push_off_chain(
+    result.molecule,
+    steps=1000,
+    stages=10,
+    amplitude=25.0,  # kJ/mol maximum per overlapping pair
+    temperature=300.0,  # K
+    seed=7,
+)
+# Pass `chain` to pack_chains([chain]) after relaxation.
 ```
 
-`push_off_steps` is the total MD step count and is divided as evenly as possible among the stages. The cosine repulsion has a finite maximum at complete overlap and a pair cutoff based on the force-field Lennard-Jones sizes. `push_off_timestep` (fs), `push_off_friction` (1/ps), and `push_off_cutoff_scale` can adjust the dynamics and soft-core range. This is an overlap-relaxation stage, not a substitute for full physical equilibration.
+`steps` is the total MD step count and is divided as evenly as possible among the stages. The cosine repulsion has a finite maximum at complete overlap and a pair cutoff based on the force-field Lennard-Jones sizes. `timestep` (fs), `friction` (1/ps), and `cutoff_scale` tune the dynamics and soft-core range. This is an overlap-relaxation stage, not a substitute for full physical equilibration.
 - **None:** assemble and validate coordinates without energy minimization.
 
 You can pass a configured optimizer instance instead of a string:
