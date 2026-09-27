@@ -12,7 +12,7 @@ A Python library for building 3D polymer structures with automatic retry/rollbac
 - **Polymerization**: Self-avoiding random walk with retry/rollback mechanism
 - **Geometry Optimization**: MMFF94s or OpenFF with NAGL charges
 - **Packing**: Pack multiple chains into periodic boxes using Packmol
-- **Export**: Save to OpenMM XML, LAMMPS data files, GROMACS topology, PDB
+- **Export**: Write OpenMM, LAMMPS, GROMACS, or PDB files through OpenFF Interchange
 - **Performance**: Numba-accelerated geometry calculations
 
 ## Installation
@@ -74,82 +74,6 @@ docker run --rm polymer-generator-openff python -m pytest -q
 docker run --rm polymer-generator-openff python -c "import openmm; print(openmm.__version__)"
 ```
 
-### JSON API and container runner
-
-The API contract is versioned and uses one request and one response per JSONL line. The request envelope is:
-
-```json
-{
-  "api_version": "1.0",
-  "request_id": "job-42",
-  "action": "build",
-  "input": {
-    "smiles": "*CC(c1ccccc1)*",
-    "units": 8,
-    "tacticity": "atactic",
-    "seed": 7
-  }
-}
-```
-
-`request_id` is optional; when provided, it is echoed in the response. The `input` fields depend on `action`; unknown fields are rejected to catch misspellings. Exactly one `units` or `target_atoms` is required for `build`, matching the Python API. `tacticity` accepts `atactic`, `isotactic`, `syndiotactic`, or a `+`/`-` sequence. The optimizer can be `"mmff"`, `"openff"`, or `null`; `optimizer_options` is an object of optimizer-specific options. Optional `config` maps to `BuildConfig` and can set `bond_length`, `dihedral`, `random_rot`, `dist_min`, `retry`, `rollback`, `retry_step`, and `check_bond_length` (as well as `tacticity` and `tacticity_center`).
-
-Successful responses have `ok: true` and a `result`; failures have `ok: false` and a stable `error.code` plus a human-readable `error.message`. Result coordinates are self-contained text payloads, so clients need not share a filesystem with the container.
-
-```json
-{
-  "api_version": "1.0",
-  "request_id": "job-42",
-  "ok": true,
-  "result": {
-    "molecule": {"format": "mol", "data": "... MOL block ..."},
-    "properties": {"atoms": 123, "heavy_atoms": 43, "formula": "C32H48"},
-    "diagnostics": {"attempts": 1, "rollbacks": 0, "elapsed_seconds": 0.3}
-  }
-}
-```
-
-Supported actions:
-
-| Action | Required input | Result |
-| --- | --- | --- |
-| `build` | `smiles` and exactly one of `units` or `target_atoms` | MOL block, atom counts, formula, and build diagnostics |
-| `push_off` | `molecule` (`format: "mol"` or `"sdf"`, with coordinates) | Relaxed MOL block and molecule properties |
-| `pack` | nonempty `molecules` array of coordinate-bearing MOL/SDF objects | OpenFF Topology JSON and PDB text with periodic box |
-| `build_push_off_pack` | nested `build` settings; optional `chain_count`, `push_off`, and `pack` objects | Build and relaxed chain structures plus the packed OpenFF Topology JSON and PDB |
-
-For `push_off`, additional input fields map to the corresponding `push_off_chain` keyword arguments (`steps`, `stages`, `temperature`, `seed`, `soft_minimize`, and others). For `pack`, optional inputs are `density` in g/mL, `max_attempts`, and `tolerance` in Å. A `build` result can be passed to `push_off`; its `result.molecule` value is already in the required MOL object format. A `pack` action takes an array of such molecules.
-
-Use `build_push_off_pack` to run all three stages within one request. `chain_count` defaults to `1`; when multiple chains are requested, provided build and push-off seeds are incremented per chain to generate distinct reproducible trajectories. `push_off` and `pack` are option objects corresponding to the options of the standalone actions. Each stage's outputs are returned under `result.build`, `result.push_off`, and `result.pack`. If a stage fails, the response uses `PIPELINE_STAGE_FAILED` and names the stage in the error message.
-
-```json
-{
-  "api_version": "1.0",
-  "request_id": "full-run-1",
-  "action": "build_push_off_pack",
-  "input": {
-    "build": {
-      "smiles": "*CC(c1ccccc1)*",
-      "units": 8,
-      "optimizer": null,
-      "seed": 7
-    },
-    "chain_count": 4,
-    "push_off": {"steps": 1000, "stages": 10, "seed": 20},
-    "pack": {"density": 0.3, "max_attempts": 5, "tolerance": 2.0}
-  }
-}
-```
-
-Example request stream for a build followed by push-off (each object must be sent on its own line):
-
-```jsonl
-{"api_version":"1.0","request_id":"build-1","action":"build","input":{"smiles":"*CC(c1ccccc1)*","units":4,"optimizer":null,"seed":7}}
-{"api_version":"1.0","request_id":"relax-1","action":"push_off","input":{"molecule":{"format":"mol","data":"... copy result.molecule.data here ..."},"steps":100,"stages":10,"seed":7}}
-```
-
-When the runner is called through Docker, keep stdin open (`-i`) and read stdout line by line. The same protocol can be used over any future transport: decode a request object, call `polymer_lib.api.handle_request`, then encode the response object.
-
 ## Quick Start
 ### Build a chain in one call
 
@@ -165,40 +89,6 @@ if not result.success:
 polymer = result.molecule
 print(f"built in {result.elapsed_seconds:.1f}s; attempts={result.attempts}")
 ```
-
-### Configure a build
-
-Use `BuildConfig` to group geometric and retry settings. The default `dist_min=1.8` checks nonbonded heavy-atom contacts across the full current chain. Set `seed` to make both the initial monomer conformer and random growth rotations reproducible.
-
-```python
-from polymer_lib import BuildConfig, Polymerizer
-
-polymerizer = Polymerizer.from_smiles(
-    '*CC(c1ccccc1)*',
-    count=20,
-    config=BuildConfig(dist_min=1.8, retry=100, rollback=5),
-    optimizer='mmff',
-    optimizer_options={'max_iters': 1000},
-    seed=7,
-)
-result = polymerizer.build()
-if result.success:
-    polymer = result.molecule
-```
-
-The advanced API still accepts a list of `Monomer` objects. `build()` now returns a `BuildResult`; use `build_mol()` if existing code needs the older molecule-or-`None` return value.
-
-### Pack chains
-
-For default packing settings, use the helper function:
-
-```python
-from polymer_lib.packer import pack_chains
-
-topology = pack_chains(chains, density=0.3)
-```
-
-Use `PackmolPacker` directly when you need to configure retry count or tolerance.
 
 ## API Reference
 
@@ -464,9 +354,9 @@ Polymerizer(
 
 - **MMFF94s:** `optimizer='mmff'`. Defaults: `max_iters=1000`, `variant='MMFF94s'`, `non_bonded_thresh=3.0 Å`. Example options: `optimizer_options={'max_iters': 1500, 'variant': 'MMFF94'}`. Nonconvergence rejects that candidate and invokes retry logic.
 - **OpenFF:** `optimizer='openff'` or an `OpenFFOptimizer` object. Constructor defaults: `forcefield='openff-2.1.0.offxml'`, `max_iters=50`, platform `CPU`, tolerance `10.0 kJ/(mol·nm)`, and the installed default NAGL charge model. Install the full environment to use it.
+- **None:** assemble and validate coordinates without energy minimization.
 
 Use [`push_off_chain`](#push_off_chain) as an optional post-build step before packing. It performs overlap relaxation; it does not pack chains or replace full physical equilibration.
-- **None:** assemble and validate coordinates without energy minimization.
 
 You can pass a configured optimizer instance instead of a string:
 
@@ -488,6 +378,75 @@ topology = pack_chains(chains, density=0.3)
 ```
 
 For direct control, use `PackmolPacker(density=0.3, max_attempts=5, tolerance=2.0).pack(chains)`. Density is in g/mL; tolerance is in Å. Packing requires the OpenFF/Interchange/Packmol dependencies in the full environment.
+
+### JSON API and container runner
+
+The API contract is versioned and uses one request and one response per JSONL line. The request envelope is:
+
+```json
+{
+  "api_version": "1.0",
+  "request_id": "job-42",
+  "action": "build",
+  "input": {
+    "smiles": "*CC(c1ccccc1)*",
+    "units": 8,
+    "tacticity": "atactic",
+    "seed": 7
+  }
+}
+```
+
+`request_id` is optional; when provided, it is echoed in the response. The `input` fields depend on `action`; unknown fields are rejected to catch misspellings. Exactly one `units` or `target_atoms` is required for `build`, matching the Python API. `tacticity` accepts `atactic`, `isotactic`, `syndiotactic`, or a `+`/`-` sequence. The optimizer can be `"mmff"`, `"openff"`, or `null`; `optimizer_options` is an object of optimizer-specific options. Optional `config` maps to `BuildConfig` and can set `bond_length`, `dihedral`, `random_rot`, `dist_min`, `retry`, `rollback`, `retry_step`, and `check_bond_length` (as well as `tacticity` and `tacticity_center`).
+
+Successful responses have `ok: true` and a `result`; failures have `ok: false` and a stable `error.code` plus a human-readable `error.message`. Result coordinates are self-contained text payloads, so clients need not share a filesystem with the container.
+
+```json
+{
+  "api_version": "1.0",
+  "request_id": "job-42",
+  "ok": true,
+  "result": {
+    "molecule": {"format": "mol", "data": "... MOL block ..."},
+    "properties": {"atoms": 123, "heavy_atoms": 43, "formula": "C32H48"},
+    "diagnostics": {"attempts": 1, "rollbacks": 0, "elapsed_seconds": 0.3}
+  }
+}
+```
+
+Supported actions:
+
+| Action | Required input | Result |
+| --- | --- | --- |
+| `build` | `smiles` and exactly one of `units` or `target_atoms` | MOL block, atom counts, formula, and build diagnostics |
+| `push_off` | `molecule` (`format: "mol"` or `"sdf"`, with coordinates) | Relaxed MOL block and molecule properties |
+| `pack` | nonempty `molecules` array of coordinate-bearing MOL/SDF objects | OpenFF Topology JSON and PDB text with periodic box |
+| `build_push_off_pack` | nested `build` settings; optional `chain_count`, `push_off`, and `pack` objects | Build and relaxed chain structures plus the packed OpenFF Topology JSON and PDB |
+
+For `push_off`, additional input fields map to the corresponding `push_off_chain` keyword arguments (`steps`, `stages`, `temperature`, `seed`, `soft_minimize`, and others). For `pack`, optional inputs are `density` in g/mL, `max_attempts`, and `tolerance` in Å. A `build` result can be passed to `push_off`; its `result.molecule` value is already in the required MOL object format. A `pack` action takes an array of such molecules.
+
+Use `build_push_off_pack` to run all three stages within one request. `chain_count` defaults to `1`; when multiple chains are requested, provided build and push-off seeds are incremented per chain to generate distinct reproducible trajectories. `push_off` and `pack` are option objects corresponding to the options of the standalone actions. Each stage's outputs are returned under `result.build`, `result.push_off`, and `result.pack`. If a stage fails, the response uses `PIPELINE_STAGE_FAILED` and names the stage in the error message.
+
+```json
+{
+  "api_version": "1.0",
+  "request_id": "full-run-1",
+  "action": "build_push_off_pack",
+  "input": {
+    "build": {
+      "smiles": "*CC(c1ccccc1)*",
+      "units": 8,
+      "optimizer": null,
+      "seed": 7
+    },
+    "chain_count": 4,
+    "push_off": {"steps": 1000, "stages": 10, "seed": 20},
+    "pack": {"density": 0.3, "max_attempts": 5, "tolerance": 2.0}
+  }
+}
+```
+
+When the runner is called through Docker, keep stdin open (`-i`) and read stdout line by line. The same protocol can be used over any future transport: decode a request object, call `polymer_lib.api.handle_request`, then encode the response object.
 
 ### Save a prepared chain for OpenMM MD
 
@@ -599,126 +558,18 @@ python -m pytest -q
 
 The current tests cover connectivity, RDKit sanitization, bond-length bounds, the exact requested length of a new inter-unit bond, nonbonded heavy-atom distances for chains up to 20 units, mixed monomer sizes, seeded reproducibility, and MMFF optimization on a two-unit chain. The 20-unit check skips energy minimization; the MMFF test covers a short chain. These are structural regression checks, not a validation of polymer thermodynamics or application-specific simulation results.
 
-### Advanced: build a single polymer chain
-```python
-from polymer_lib import Monomer, Polymerizer
-
-
-smiles = '*CC(c1ccccc1)*'  # Polystyrene
-monomer = Monomer(smiles)
-monomers_array = [monomer.copy() for _ in range(20)]
-
-polymerizer = Polymerizer(
-    monomers=monomers_array,
-    random_rot=True,
-    dist_min=1.8,
-    retry=100,
-    rollback=5,
-    retry_step=200,
-    optimizer='mmff'  # or 'openff' for higher accuracy
-)
-
-result = polymerizer.build()
-polymer = result.molecule if result.success else None
-```
-### 2. Pack Multiple Chains
-```python
-from polymer_lib.packer import PackmolPacker
-
-
-chains = []
-for i in range(5):
-    monomers_array = [monomer.copy() for _ in range(20)]
-    polymerizer = Polymerizer(
-        monomers=monomers_array,
-        optimizer='mmff'
-    )
-    result = polymerizer.build()
-    if not result.success:
-        raise RuntimeError(result.failure_reason)
-    chains.append(result.molecule)
-
-packer = PackmolPacker(
-    density=0.3,        # g/cm³
-    max_attempts=5,
-    tolerance=2.0       # Å
-)
-
-topology = packer.pack(chains)
-```
-
-### 3. Create OpenMM System
-```python
-from openff.toolkit.typing.engines.smirnoff import ForceField
-from openff.interchange import Interchange
-import openmm
-
-
-ff = ForceField("openff-2.1.0.offxml")
-interchange = Interchange.from_smirnoff(
-    force_field=ff,
-    topology=topology
-)
-
-
-system = interchange.to_openmm_system()
-topology_omm = interchange.to_openmm_topology()
-positions = interchange.positions
-
-interchange.to_pdb("system.pdb")
-
-with open("system.xml", "w") as f:
-    f.write(openmm.XmlSerializer.serialize(system))
-```
-
-### 4. Export to LAMMPS and GROMACS
-```python
-# LAMMPS
-interchange.to_lammps(prefix="system", include_type_labels=True)
-# Creates: system.lmp (data file)
-
-# GROMACS
-interchange.to_gromacs(prefix="system", monolithic=True)
-# Creates: system.top, system.gro
-```
-
 ## Architecture
-```
+```text
 polymer_lib/
-├── __init__.py              # Main exports
-├── calc.py                  # Geometry calculations (Numba-accelerated)
-├── utils.py                 # RDKit utilities and logging
-├── poly.py                  # Core polymerization logic
-├── monomer.py               # Monomer class
-├── polymerizer.py           # Polymerizer class
-├── packer.py                # Packmol wrapper
-└── optimizers/              # Structure optimizers
-    ├── base.py              # BaseOptimizer ABC
-    ├── mmff.py              # MMFF94s optimizer
-    └── openff.py            # OpenFF + NAGL optimizer
-```
-
-## Optimizers
-### MMFF94s (Fast)
-```python
-polymerizer = Polymerizer(
-    monomers=monomers_array,
-    optimizer='mmff'
-)
-```
-### OpenFF with NAGL Charges (Accurate)
-```python
-from polymer_lib import OpenFFOptimizer
-
-optimizer = OpenFFOptimizer(
-    forcefield='openff-2.1.0.offxml',
-    max_iters=1000,
-    platform='CPU',
-    charge_method='openff-gnn-am1bcc-1.0.0.pt'
-)
-
-polymerizer = Polymerizer(
-    monomers=monomers_array,
-    optimizer=optimizer
-)
+├── __init__.py     # Main package exports
+├── api.py          # Versioned JSON request/response API
+├── runner.py       # JSON Lines stdin/stdout process used by Docker
+├── utils.py        # RDKit helpers and library logging
+├── monomer.py      # RDKit monomer construction
+├── polymerizer.py  # Chain growth, retries, and BuildResult
+├── push_off.py     # OpenMM soft-potential relaxation
+├── packer.py       # Packmol box packing
+├── poly.py         # Molecular connection and geometry logic
+├── calc.py         # Numba-accelerated geometry calculations
+└── optimizers/     # MMFF and OpenFF optimizers
 ```
