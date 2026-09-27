@@ -18,6 +18,9 @@ def push_off_chain(
     cutoff_scale: float = 1.5,
     seed: int = None,
     platform: str = 'CPU',
+    soft_minimize: bool = True,
+    soft_minimize_max_iters: int = 200,
+    soft_minimize_tolerance: float = 10.0,
     minimize: bool = True,
     max_iters: int = 200,
     tolerance: float = 10.0,
@@ -43,6 +46,9 @@ def push_off_chain(
         cutoff_scale: Pair cutoff as a multiple of mixed Lennard-Jones sigma.
         seed: Optional random seed for initial velocities and Langevin dynamics.
         platform: OpenMM platform name, such as ``CPU`` or ``CUDA``.
+        soft_minimize: Minimize using the soft potential before Langevin MD.
+        soft_minimize_max_iters: Maximum minimizer iterations for the soft system.
+        soft_minimize_tolerance: Soft minimizer force tolerance in kJ/(mol nm).
         minimize: Run physical OpenFF energy minimization after push-off.
         max_iters: Maximum minimizer iterations when ``minimize`` is true.
         tolerance: Minimizer force tolerance in kJ/(mol nm).
@@ -60,6 +66,10 @@ def push_off_chain(
         raise ValueError('temperature, timestep, friction, amplitude, and cutoff_scale must be positive')
     if not isinstance(max_iters, int) or max_iters < 0:
         raise ValueError('max_iters must be a nonnegative integer')
+    if not isinstance(soft_minimize_max_iters, int) or soft_minimize_max_iters < 0:
+        raise ValueError('soft_minimize_max_iters must be a nonnegative integer')
+    if soft_minimize_tolerance <= 0:
+        raise ValueError('soft_minimize_tolerance must be positive')
     if seed is not None and (not isinstance(seed, int) or not 0 <= seed <= 2**31 - 1):
         raise ValueError('seed must be between 0 and 2**31 - 1')
 
@@ -115,6 +125,9 @@ def push_off_chain(
         cutoff_scale=cutoff_scale,
         seed=seed,
         platform=platform,
+        soft_minimize=soft_minimize,
+        soft_minimize_max_iters=soft_minimize_max_iters,
+        soft_minimize_tolerance=soft_minimize_tolerance,
     )
 
     integrator = openmm.VerletIntegrator(1.0 * unit.femtoseconds)
@@ -157,6 +170,7 @@ def _get_nonbonded_force(system, openmm):
 def _run_soft_push_off(
     *, system, nonbonded, positions, openmm, unit, steps, stages,
     temperature, timestep, friction, amplitude, cutoff_scale, seed, platform,
+    soft_minimize, soft_minimize_max_iters, soft_minimize_tolerance,
 ):
     """Run soft dynamics and restore every physical nonbonded parameter."""
     soft_force = openmm.CustomNonbondedForce(
@@ -216,6 +230,16 @@ def _run_soft_push_off(
             system, integrator, openmm.Platform.getPlatformByName(platform)
         )
         context.setPositions(positions)
+        if soft_minimize:
+            openmm.LocalEnergyMinimizer.minimize(
+                context,
+                tolerance=(
+                    soft_minimize_tolerance
+                    * unit.kilojoules_per_mole
+                    / unit.nanometer
+                ),
+                maxIterations=soft_minimize_max_iters,
+            )
         if seed is None:
             context.setVelocitiesToTemperature(temperature * unit.kelvin)
         else:

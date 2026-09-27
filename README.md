@@ -141,10 +141,12 @@ Returns `BuildResult`. Invalid SMILES, linkers, unit counts, or options raise ex
 push_off_chain(mol, *, forcefield='openff-2.1.0.offxml', steps=1000,
                stages=10, temperature=300.0, timestep=1.0, friction=1.0,
                amplitude=25.0, cutoff_scale=1.5, seed=None, platform='CPU',
+               soft_minimize=True, soft_minimize_max_iters=200,
+               soft_minimize_tolerance=10.0,
                minimize=True, max_iters=200, tolerance=10.0)
 ```
 
-Run this after `build_polymer` has assembled the complete chain and before packing. It returns a **copy** of the RDKit molecule with relaxed coordinates; the input object is unchanged. Requires the optional OpenFF/OpenMM/NAGL environment. `steps` and `stages` control the staged soft dynamics; `amplitude` is the maximum soft pair energy in kJ/mol. With `minimize=True`, physical OpenFF interactions are restored and a force-field minimization follows the push-off. Set `minimize=False` to return after the soft dynamics only.
+Run this after `build_polymer` has assembled the complete chain and before packing. It returns a **copy** of the RDKit molecule with relaxed coordinates; the input object is unchanged. Requires the optional OpenFF/OpenMM/NAGL environment. By default, the chain is first minimized with the soft potential (`soft_minimize=True`), then `steps` and `stages` control the staged soft dynamics; `amplitude` is the maximum soft pair energy in kJ/mol. With `minimize=True`, physical OpenFF interactions are restored and a force-field minimization follows the push-off. Set `minimize=False` to return after the soft dynamics only.
 
 ```python
 from polymer_lib import build_polymer, push_off_chain
