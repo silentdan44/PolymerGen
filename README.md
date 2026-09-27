@@ -57,6 +57,21 @@ To use only the OpenFF optimizer from an existing core environment, install the 
 
 Run the geometry and polymerization checks with `python -m pytest`.
 
+### Docker
+
+The Docker image uses `environment-openff.yml`, including OpenFF, OpenMM, NAGL, Packmol, and the test dependencies. Build and run the full test suite with:
+
+```bash
+docker build -t polymer-generator-openff .
+docker run --rm polymer-generator-openff
+```
+
+The image's default command is `python -m pytest -q`. To run another command in the prepared environment, pass it after the image name, for example:
+
+```bash
+docker run --rm polymer-generator-openff python -c "import openmm; print(openmm.__version__)"
+```
+
 ## Quick Start
 ### Build a chain in one call
 
@@ -467,7 +482,7 @@ state = simulation.context.getState(getPositions=True, getVelocities=True)
 with (out / 'state.xml').open('w') as file:
     file.write(openmm.XmlSerializer.serialize(state))
 with (out / 'chain.pdb').open('w') as file:
-    PDBFile.writeFile(topology, positions, file, keepIds=True)
+    PDBFile.writeFile(topology, positions, file)
 (out / 'interchange.json').write_text(interchange.model_dump_json(indent=2))
 
 # Optional exact checkpoint. Load only with a compatible OpenMM version,

@@ -174,13 +174,23 @@ def _run_soft_push_off(
 ):
     """Run soft dynamics and restore every physical nonbonded parameter."""
     soft_force = openmm.CustomNonbondedForce(
-        'step(rc-r)*0.5*push_off_amplitude*(1+cos(pi*r/rc)); '
+        'step(rc-r)*0.5*push_off_amplitude*(1+cos(3.141592653589793*r/rc)); '
         'rc=push_off_cutoff_scale*0.5*(sigma1+sigma2)'
     )
     soft_force.addGlobalParameter('push_off_amplitude', 0.0)
     soft_force.addGlobalParameter('push_off_cutoff_scale', cutoff_scale)
     soft_force.addPerParticleParameter('sigma')
-    soft_force.setNonbondedMethod(openmm.CustomNonbondedForce.CutoffNonPeriodic)
+    nonbonded_method = nonbonded.getNonbondedMethod()
+    if nonbonded_method == openmm.NonbondedForce.NoCutoff:
+        soft_force.setNonbondedMethod(openmm.CustomNonbondedForce.NoCutoff)
+    elif nonbonded_method == openmm.NonbondedForce.CutoffNonPeriodic:
+        soft_force.setNonbondedMethod(
+            openmm.CustomNonbondedForce.CutoffNonPeriodic
+        )
+    else:
+        # PME/Ewald/LJPME and CutoffPeriodic all use periodic pair distances
+        # in OpenMM. The temporary soft term follows their existing cutoff.
+        soft_force.setNonbondedMethod(openmm.CustomNonbondedForce.CutoffPeriodic)
     soft_force.setUseLongRangeCorrection(False)
 
     sigmas = []
@@ -191,7 +201,8 @@ def _run_soft_push_off(
         soft_force.addParticle([sigma_nm])
     if not sigmas or max(sigmas) <= 0:
         raise ValueError('soft push-off needs positive Lennard-Jones sigma values')
-    soft_force.setCutoffDistance(cutoff_scale * max(sigmas) * unit.nanometer)
+    if nonbonded_method != openmm.NonbondedForce.NoCutoff:
+        soft_force.setCutoffDistance(nonbonded.getCutoffDistance())
 
     original_particles = [
         nonbonded.getParticleParameters(i)
@@ -252,7 +263,7 @@ def _run_soft_push_off(
             context.setParameter(
                 'push_off_amplitude', amplitude * (stage + 1) / stages
             )
-            context.step(per_stage + (stage < remainder))
+            integrator.step(per_stage + (stage < remainder))
         return context.getState(getPositions=True).getPositions(asNumpy=True)
     finally:
         if context is not None:
