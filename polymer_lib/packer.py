@@ -99,3 +99,12 @@ class PackmolPacker:
                     ) from e
                     
         raise RuntimeError("Packmol failed unexpectedly.")
+
+
+def pack_chains(chains, density=0.3, max_attempts=5, tolerance=2.0):
+    """Pack RDKit polymer chains with the default Packmol settings."""
+    return PackmolPacker(
+        density=density,
+        max_attempts=max_attempts,
+        tolerance=tolerance,
+    ).pack(chains)

@@ -12,7 +12,7 @@ from .utils import logger
 
 
 def set_linker_flag(mol, reverse=False, label=1):
-    flag = False
+    linker_indices = []
     mol.SetIntProp('head_idx', -1)
     mol.SetIntProp('tail_idx', -1)
     mol.SetIntProp('head_ne_idx', -1)
@@ -28,16 +28,17 @@ def set_linker_flag(mol, reverse=False, label=1):
            (atom.GetSymbol() == "*" and not atom.HasProp('ff_type')) or \
            (atom.HasProp('terminal') and atom.GetBoolProp('terminal')):
             atom.SetBoolProp('linker', True)
-            if not flag:
-                mol_head_idx = atom.GetIdx()
-                mol_tail_idx = atom.GetIdx()
-                flag = True
-            else:
-                if reverse:
-                    mol_head_idx = atom.GetIdx()
-                else:
-                    mol_tail_idx = atom.GetIdx()
-    if not flag:
+            linker_indices.append(atom.GetIdx())
+    if not linker_indices:
+        return False
+    # Assign the first/last linker as head/tail, preserving atom ordering.
+    mol_head_idx = linker_indices[0]
+    mol_tail_idx = linker_indices[-1]
+    if reverse and len(linker_indices) > 1:
+        mol_head_idx, mol_tail_idx = mol_tail_idx, mol_head_idx
+    if len(linker_indices) < 2 or \
+       len(mol.GetAtomWithIdx(mol_head_idx).GetNeighbors()) != 1 or \
+       len(mol.GetAtomWithIdx(mol_tail_idx).GetNeighbors()) != 1:
         return False
     mol.SetIntProp('head_idx', mol_head_idx)
     mol.GetAtomWithIdx(mol_head_idx).SetBoolProp('head', True)
@@ -107,7 +108,7 @@ def combine_mols(mol1, mol2, res_name_1='RU0', res_name_2='RU0'):
 def connect_mols(mol1, mol2, bond_length=1.5, dihedral=np.pi, random_rot=False,
                  set_linker=True, label1=1, label2=1,
                  confId1=0, confId2=0,
-                 res_name_1='RU0', res_name_2='RU0'):
+                 res_name_1='RU0', res_name_2='RU0', rng=None):
     """
     Connect tail atom in mol1 to head atom in mol2.
     Uses PROVEN WORKING LOGIC from RadonPy 0.2.9.
@@ -146,6 +147,8 @@ def connect_mols(mol1, mol2, bond_length=1.5, dihedral=np.pi, random_rot=False,
         mol2_coord_rot = calc.rotate_rod(mol2_coord, vcross, (np.pi - angle), center=center)
 
     # Translation mol2
+    # tail_vec points from the tail linker back into the existing chain, so
+    # continue growth in the opposite direction.
     trans = mol1_coord[mol1.GetIntProp('tail_ne_idx')] - (
         bond_length * mol1_tail_vec / np.linalg.norm(mol1_tail_vec)
     )
@@ -153,7 +156,8 @@ def connect_mols(mol1, mol2, bond_length=1.5, dihedral=np.pi, random_rot=False,
 
     # Rotation mol2 around new bond
     if random_rot:
-        dih = np.random.uniform(-np.pi, np.pi)
+        rng = np.random.default_rng() if rng is None else rng
+        dih = rng.uniform(-np.pi, np.pi)
     else:
         dih = calc.dihedral_coord(
             mol1_coord[mol1.GetIntProp('head_idx')],
@@ -210,8 +214,8 @@ def check_3d_proximity(coord1, coord2=None, dist_min=1.5, ignore_rad=3, dmat=Non
     if dmat is not None:
         imat = np.where(dmat <= ignore_rad, np.nan, 1)
         dist_matrix = dist_matrix * imat
-
-    return np.nanmin(dist_matrix) > dist_min
+    finite = dist_matrix[~np.isnan(dist_matrix)]
+    return bool(finite.size == 0 or np.min(finite) > dist_min)
 
 
 def check_3d_bond_length(mol, confId=0, bond_s=2.7, bond_a=1.9, bond_d=1.8, bond_t=1.4):
@@ -236,29 +240,99 @@ def check_3d_bond_length(mol, confId=0, bond_s=2.7, bond_a=1.9, bond_d=1.8, bond
     return check
 
 
-def check_3d_structure_poly(poly, mon, poly_dmat=None, dist_min=1.0, ignore_rad=3, check_bond_length=False):
+def check_3d_structure_poly(poly, mon, poly_dmat=None, dist_min=1.0, ignore_rad=3,
+                            check_bond_length=False, previous_atom_count=None,
+                            added_atom_indices=None, removed_head_idx=None):
     """
     Improved 3D structure check with self-intersection detection.
     """
     n_mon = mon.GetNumAtoms()
+    n_poly = poly.GetNumAtoms()
+    if n_mon == 0 or n_poly < n_mon:
+        return False
     coord = np.array(poly.GetConformer(0).GetPositions())
+    if coord.shape[0] != n_poly:
+        return False
+
+    if added_atom_indices is None:
+        if previous_atom_count is None:
+            # Compatibility for direct callers with equal-sized repeat units.
+            n_previous = n_poly - (n_mon - 2)
+        else:
+            n_previous = previous_atom_count - 1
+        if n_previous < 0 or n_previous > n_poly:
+            return False
+        added_atom_indices = list(range(n_previous, n_poly))
+    added_atom_indices = sorted(set(added_atom_indices))
+    if not added_atom_indices or added_atom_indices[0] < 0 or added_atom_indices[-1] >= n_poly:
+        return False
+    added_set = set(added_atom_indices)
+    previous_indices = [i for i in range(n_poly) if i not in added_set]
+    p_coord = coord[previous_indices]
+    m_coord = coord[added_atom_indices]
     
-    # Split coordinates
-    p_coord = coord[:-n_mon]  # Polymer without last monomer
-    m_coord = coord[-n_mon:]  # Last monomer
-    
-    # Check 1: Proximity between polymer and new monomer
-    if poly_dmat is not None:
-        poly_dmat_sliced = poly_dmat[:-n_mon, -n_mon:]
-    else:
-        poly_dmat_sliced = None
-    
-    check = check_3d_proximity(p_coord, coord2=m_coord, dist_min=dist_min, 
-                               dmat=poly_dmat_sliced, ignore_rad=ignore_rad)
-    
-    # Check 2: Self-intersection within the new monomer (if it's large)
-    if check and n_mon > 10:
-        check = check_3d_proximity(m_coord, coord2=None, dist_min=dist_min, ignore_rad=ignore_rad)
+    # Ignore only pairs connected by a short covalent path. A fixed index
+    # radius can hide clashes when atom order differs from chain order.
+    ignore_mask = np.ones((p_coord.shape[0], len(added_atom_indices)), dtype=bool)
+    adjacency = [[] for _ in range(n_poly)]
+    for bond in poly.GetBonds():
+        a, b = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+        adjacency[a].append(b)
+        adjacency[b].append(a)
+    atom_to_row = {atom_idx: row for row, atom_idx in enumerate(previous_indices)}
+    atom_to_col = {atom_idx: col for col, atom_idx in enumerate(added_atom_indices)}
+    for atom_idx, i in atom_to_row.items():
+        seen = {atom_idx}
+        frontier = {atom_idx}
+        for _ in range(ignore_rad):
+            frontier = {j for k in frontier for j in adjacency[k] if j not in seen}
+            seen.update(frontier)
+        for j in seen:
+            if j in atom_to_col:
+                ignore_mask[i, atom_to_col[j]] = False
+    distances = calc.distance_matrix(p_coord, m_coord)
+    distances[~ignore_mask] = np.inf
+    check = bool(np.all(distances > dist_min))
+
+    # Check nonbonded contacts within the added monomer too. The molecular
+    # graph, rather than atom count, determines which pairs are excluded.
+    if check:
+        mon_distances = calc.distance_matrix(m_coord)
+        # New unit has lost its head linker; convert original atom indices
+        # into product-local indices before excluding bonded pairs.
+        if removed_head_idx is None:
+            removed_head_idx = mon.GetIntProp('head_idx') if mon.HasProp('head_idx') else None
+        original_to_local = {}
+        local_idx = 0
+        for atom_idx in range(n_mon):
+            if atom_idx == removed_head_idx:
+                continue
+            original_to_local[atom_idx] = local_idx
+            local_idx += 1
+        # The incoming head linker is removed during connection, so the
+        # remaining atoms map in order to the added coordinate block.
+        if local_idx != len(added_atom_indices):
+            return False
+        for bond in mon.GetBonds():
+            a, b = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+            if a in original_to_local and b in original_to_local:
+                a, b = original_to_local[a], original_to_local[b]
+                mon_distances[a, b] = np.inf
+                mon_distances[b, a] = np.inf
+        # Exclude 1-3 bonded-neighbor pairs, which are constrained by angles.
+        for atom in mon.GetAtoms():
+            i_original = atom.GetIdx()
+            if i_original not in original_to_local:
+                continue
+            i = original_to_local[i_original]
+            for neighbor in atom.GetNeighbors():
+                for second in neighbor.GetNeighbors():
+                    j_original = second.GetIdx()
+                    if j_original in original_to_local:
+                        j = original_to_local[j_original]
+                        mon_distances[i, j] = np.inf
+        np.fill_diagonal(mon_distances, np.inf)
+        check = bool(np.all(mon_distances > dist_min))
     
     # Check 3: Bond lengths
     if check and check_bond_length:

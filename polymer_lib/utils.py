@@ -164,6 +164,9 @@ def mol_from_smiles(smiles, coord=True):
     etkdg.useRandomCoords = False
     try:
         mol = Chem.MolFromSmiles(smi)
+        if mol is None:
+            logger.error(f'Cannot parse SMILES: {smiles}')
+            return None
         mol = Chem.AddHs(mol)
     except Exception as e:
         logger.error(f'Cannot transform to RDKit Mol object from {smiles}: {e}')

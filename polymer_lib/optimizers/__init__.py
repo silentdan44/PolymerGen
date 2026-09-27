@@ -8,7 +8,6 @@ function to obtain an optimizer by name.
 
 from .base import BaseOptimizer
 from .mmff import MMFFOptimizer
-from .openff import OpenFFOptimizer
 
 __all__ = ['BaseOptimizer', 'MMFFOptimizer', 'OpenFFOptimizer', 'get_optimizer']
 
@@ -35,6 +34,13 @@ def get_optimizer(name: str, **kwargs) -> BaseOptimizer:
     if name == 'mmff':
         return MMFFOptimizer(**kwargs)
     elif name == 'openff':
+        try:
+            from .openff import OpenFFOptimizer
+        except ImportError as e:
+            raise ImportError(
+                "The OpenFF optimizer requires the optional OpenFF, OpenMM, "
+                "and NAGL dependencies. Install them to use optimizer='openff'."
+            ) from e
         return OpenFFOptimizer(**kwargs)
     else:
         raise ValueError(f"Unknown optimizer: {name}. Available: 'mmff', 'openff'")

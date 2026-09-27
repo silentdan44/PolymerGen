@@ -8,19 +8,28 @@ Main entry points:
 """
 
 from .monomer import Monomer
-from .polymerizer import Polymerizer
+from .polymerizer import BuildConfig, BuildResult, Polymerizer, build_polymer
 from .optimizers import (
     BaseOptimizer,
     MMFFOptimizer,
-    OpenFFOptimizer,
     get_optimizer,
 )
+
+try:
+    from .optimizers.openff import OpenFFOptimizer
+except ImportError:
+    OpenFFOptimizer = None
 
 __all__ = [
     'Monomer',
     'Polymerizer',
+    'BuildConfig',
+    'BuildResult',
+    'build_polymer',
     'BaseOptimizer',
     'MMFFOptimizer',
-    'OpenFFOptimizer',
     'get_optimizer',
 ]
+
+if OpenFFOptimizer is not None:
+    __all__.append('OpenFFOptimizer')

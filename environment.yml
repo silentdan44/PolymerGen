@@ -1,0 +1,15 @@
+name: polymer-generator
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - rdkit>=2023.03
+  - numpy>=1.21
+  - scipy>=1.7
+  - numba>=0.57
+  - tqdm>=4.62
+  - pytest>=7
+  - pytest-cov>=4
+  - pip:
+      - -e .

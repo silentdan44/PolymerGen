@@ -38,7 +38,13 @@ class Monomer:
         self.mol = utils.mol_from_smiles(smiles, coord=True)
         if self.mol is None:
             raise ValueError(f"Cannot build monomer from SMILES: {smiles}")
-        poly.set_linker_flag(self.mol)
+        has_valid_linkers = poly.set_linker_flag(self.mol)
+        linker_count = sum(atom.GetBoolProp('linker') for atom in self.mol.GetAtoms())
+        if linker_count != 2 or not has_valid_linkers:
+            raise ValueError(
+                f"A polymerizable monomer must have exactly two valid connection points; "
+                f"found {linker_count} in SMILES: {smiles}"
+            )
 
     def copy(self):
         """
@@ -53,5 +59,6 @@ class Monomer:
         new_monomer = Monomer.__new__(Monomer)
         new_monomer.smiles = self.smiles
         new_monomer.mol = utils.deepcopy_mol(self.mol)
-        poly.set_linker_flag(new_monomer.mol)
+        if not poly.set_linker_flag(new_monomer.mol):
+            raise ValueError(f"Copied monomer has invalid connection points: {self.smiles}")
         return new_monomer
