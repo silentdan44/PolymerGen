@@ -22,7 +22,7 @@ class BuildConfig:
     bond_length: float = 1.5
     dihedral: float = np.pi
     random_rot: bool = True
-    dist_min: float = 0.7
+    dist_min: float = 1.8
     retry: int = 100
     rollback: int = 5
     retry_step: int = 200
@@ -53,7 +53,7 @@ class Polymerizer:
     """
 
     def __init__(self, monomers, bond_length=1.5, dihedral=np.pi, random_rot=True,
-                 dist_min=0.7, retry=100, rollback=5, retry_step=200,
+                 dist_min=1.8, retry=100, rollback=5, retry_step=200,
                  check_bond_length=True, optimizer=None, optimizer_options=None,
                  config=None, seed=None):
         """
@@ -64,7 +64,7 @@ class Polymerizer:
             bond_length: Target length for new bonds (Angstrom).
             dihedral: Target dihedral angle around new bonds (radians).
             random_rot: If True, use a random dihedral at each step.
-            dist_min: Minimum allowed non-bonded distance (Angstrom).
+            dist_min: Minimum allowed nonbonded heavy-atom distance (Å).
             retry: Max number of additional full-chain attempts after the first.
             rollback: Number of steps to roll back on failure.
             retry_step: Max attempts per polymerization step.
@@ -123,7 +123,8 @@ class Polymerizer:
         if not isinstance(count, int) or count < 1:
             raise ValueError('count must be a positive integer')
         from .monomer import Monomer
-        monomer = Monomer(smiles)
+        seed = kwargs.get('seed')
+        monomer = Monomer(smiles, seed=seed)
         return cls([monomer.copy() for _ in range(count)], **kwargs)
 
     def _parse_optimizer(self, optimizer):

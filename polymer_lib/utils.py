@@ -144,7 +144,7 @@ def h2star(smiles):
     return smiles
 
 
-def mol_from_smiles(smiles, coord=True):
+def mol_from_smiles(smiles, coord=True, seed=None):
     """
     Build an RDKit Mol with 3D coordinates from a SMILES string.
 
@@ -162,6 +162,10 @@ def mol_from_smiles(smiles, coord=True):
     etkdg = AllChem.ETKDGv3()
     etkdg.enforceChirality = True
     etkdg.useRandomCoords = False
+    if seed is not None:
+        if not isinstance(seed, int) or not 0 <= seed <= 2**31 - 1:
+            raise ValueError('seed must be an integer between 0 and 2**31 - 1')
+        etkdg.randomSeed = seed
     try:
         mol = Chem.MolFromSmiles(smi)
         if mol is None:

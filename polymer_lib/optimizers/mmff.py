@@ -18,7 +18,7 @@ class MMFFOptimizer(BaseOptimizer):
     non-biological organic molecules.
     """
 
-    def __init__(self, max_iters: int = 50, variant: str = 'MMFF94s',
+    def __init__(self, max_iters: int = 1000, variant: str = 'MMFF94s',
                  non_bonded_thresh: float = 3.0):
         """
         Args:

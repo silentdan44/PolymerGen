@@ -204,7 +204,7 @@ def connect_mols(mol1, mol2, bond_length=1.5, dihedral=np.pi, random_rot=False,
     return mol
 
 
-def check_3d_proximity(coord1, coord2=None, dist_min=1.5, ignore_rad=3, dmat=None):
+def check_3d_proximity(coord1, coord2=None, dist_min=1.8, ignore_rad=3, dmat=None):
     if coord2 is not None:
         dist_matrix = calc.distance_matrix(coord1, coord2)
     else:
@@ -240,102 +240,52 @@ def check_3d_bond_length(mol, confId=0, bond_s=2.7, bond_a=1.9, bond_d=1.8, bond
     return check
 
 
-def check_3d_structure_poly(poly, mon, poly_dmat=None, dist_min=1.0, ignore_rad=3,
+def check_3d_structure_poly(poly, mon, poly_dmat=None, dist_min=1.8, ignore_rad=3,
                             check_bond_length=False, previous_atom_count=None,
                             added_atom_indices=None, removed_head_idx=None):
     """
-    Improved 3D structure check with self-intersection detection.
+    Check all nonbonded heavy-atom contacts in the current polymer, including
+    contacts between atoms already present before the latest optimization.
     """
-    n_mon = mon.GetNumAtoms()
     n_poly = poly.GetNumAtoms()
-    if n_mon == 0 or n_poly < n_mon:
+    if n_poly == 0 or ignore_rad < 0:
         return False
     coord = np.array(poly.GetConformer(0).GetPositions())
     if coord.shape[0] != n_poly:
         return False
-
-    if added_atom_indices is None:
-        if previous_atom_count is None:
-            # Compatibility for direct callers with equal-sized repeat units.
-            n_previous = n_poly - (n_mon - 2)
-        else:
-            n_previous = previous_atom_count - 1
-        if n_previous < 0 or n_previous > n_poly:
-            return False
-        added_atom_indices = list(range(n_previous, n_poly))
-    added_atom_indices = sorted(set(added_atom_indices))
-    if not added_atom_indices or added_atom_indices[0] < 0 or added_atom_indices[-1] >= n_poly:
-        return False
-    added_set = set(added_atom_indices)
-    previous_indices = [i for i in range(n_poly) if i not in added_set]
-    p_coord = coord[previous_indices]
-    m_coord = coord[added_atom_indices]
-    
-    # Ignore only pairs connected by a short covalent path. A fixed index
-    # radius can hide clashes when atom order differs from chain order.
-    ignore_mask = np.ones((p_coord.shape[0], len(added_atom_indices)), dtype=bool)
     adjacency = [[] for _ in range(n_poly)]
     for bond in poly.GetBonds():
         a, b = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
         adjacency[a].append(b)
         adjacency[b].append(a)
-    atom_to_row = {atom_idx: row for row, atom_idx in enumerate(previous_indices)}
-    atom_to_col = {atom_idx: col for col, atom_idx in enumerate(added_atom_indices)}
-    for atom_idx, i in atom_to_row.items():
-        seen = {atom_idx}
+
+    # Exclude only pairs with a short covalent path. Atom index proximity is
+    # unrelated to chemical connectivity and can hide real clashes.
+    heavy_indices = [
+        atom.GetIdx() for atom in poly.GetAtoms() if atom.GetSymbol() != 'H'
+    ]
+    heavy_coord = coord[heavy_indices]
+    distances = calc.distance_matrix(heavy_coord)
+    heavy_to_row = {atom_idx: row for row, atom_idx in enumerate(heavy_indices)}
+    for atom_idx, i in heavy_to_row.items():
+        seen = {atom_idx: 0}
         frontier = {atom_idx}
         for _ in range(ignore_rad):
-            frontier = {j for k in frontier for j in adjacency[k] if j not in seen}
-            seen.update(frontier)
+            next_frontier = set()
+            for atom_idx in frontier:
+                for neighbor in adjacency[atom_idx]:
+                    if neighbor not in seen:
+                        seen[neighbor] = seen[atom_idx] + 1
+                        next_frontier.add(neighbor)
+            frontier = next_frontier
         for j in seen:
-            if j in atom_to_col:
-                ignore_mask[i, atom_to_col[j]] = False
-    distances = calc.distance_matrix(p_coord, m_coord)
-    distances[~ignore_mask] = np.inf
-    check = bool(np.all(distances > dist_min))
+            if j in heavy_to_row:
+                distances[i, heavy_to_row[j]] = np.inf
 
-    # Check nonbonded contacts within the added monomer too. The molecular
-    # graph, rather than atom count, determines which pairs are excluded.
-    if check:
-        mon_distances = calc.distance_matrix(m_coord)
-        # New unit has lost its head linker; convert original atom indices
-        # into product-local indices before excluding bonded pairs.
-        if removed_head_idx is None:
-            removed_head_idx = mon.GetIntProp('head_idx') if mon.HasProp('head_idx') else None
-        original_to_local = {}
-        local_idx = 0
-        for atom_idx in range(n_mon):
-            if atom_idx == removed_head_idx:
-                continue
-            original_to_local[atom_idx] = local_idx
-            local_idx += 1
-        # The incoming head linker is removed during connection, so the
-        # remaining atoms map in order to the added coordinate block.
-        if local_idx != len(added_atom_indices):
-            return False
-        for bond in mon.GetBonds():
-            a, b = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
-            if a in original_to_local and b in original_to_local:
-                a, b = original_to_local[a], original_to_local[b]
-                mon_distances[a, b] = np.inf
-                mon_distances[b, a] = np.inf
-        # Exclude 1-3 bonded-neighbor pairs, which are constrained by angles.
-        for atom in mon.GetAtoms():
-            i_original = atom.GetIdx()
-            if i_original not in original_to_local:
-                continue
-            i = original_to_local[i_original]
-            for neighbor in atom.GetNeighbors():
-                for second in neighbor.GetNeighbors():
-                    j_original = second.GetIdx()
-                    if j_original in original_to_local:
-                        j = original_to_local[j_original]
-                        mon_distances[i, j] = np.inf
-        np.fill_diagonal(mon_distances, np.inf)
-        check = bool(np.all(mon_distances > dist_min))
-    
-    # Check 3: Bond lengths
+    nonbonded = distances[np.isfinite(distances)]
+    check = bool(nonbonded.size == 0 or np.all(nonbonded > dist_min))
+
+    # Bond lengths are validated on the whole current chain as well.
     if check and check_bond_length:
         check = check_3d_bond_length(poly)
-    
     return check

@@ -19,7 +19,7 @@ class Monomer:
         mol: RDKit Mol object with 3D coordinates and linker flags set.
     """
 
-    def __init__(self, smiles: str):
+    def __init__(self, smiles: str, seed=None):
         """
         Build a Monomer from a SMILES string.
 
@@ -35,7 +35,7 @@ class Monomer:
                 exactly two linker atoms.
         """
         self.smiles = smiles
-        self.mol = utils.mol_from_smiles(smiles, coord=True)
+        self.mol = utils.mol_from_smiles(smiles, coord=True, seed=seed)
         if self.mol is None:
             raise ValueError(f"Cannot build monomer from SMILES: {smiles}")
         has_valid_linkers = poly.set_linker_flag(self.mol)

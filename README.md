@@ -55,7 +55,7 @@ python -c "from polymer_lib import Monomer, Polymerizer, OpenFFOptimizer; from p
 
 To use only the OpenFF optimizer from an existing core environment, install the optional Python extra with `python -m pip install -e ".[openff]"`; Packmol support is provided by the full environment.
 
-To run the test suite after adding tests, use `python -m pytest`.
+Run the geometry and polymerization checks with `python -m pytest`.
 
 ## Quick Start
 ### Build a chain in one call
@@ -75,7 +75,7 @@ print(f"built in {result.elapsed_seconds:.1f}s; attempts={result.attempts}")
 
 ### Configure a build
 
-Use `BuildConfig` to group geometric and retry settings. Set `seed` to make random rotations reproducible.
+Use `BuildConfig` to group geometric and retry settings. The default `dist_min=1.8` checks nonbonded heavy-atom contacts across the full current chain. Set `seed` to make both the initial monomer conformer and random growth rotations reproducible.
 
 ```python
 from polymer_lib import BuildConfig, Polymerizer
@@ -83,7 +83,7 @@ from polymer_lib import BuildConfig, Polymerizer
 polymerizer = Polymerizer.from_smiles(
     '*CC(c1ccccc1)*',
     count=20,
-    config=BuildConfig(dist_min=0.7, retry=100, rollback=5),
+    config=BuildConfig(dist_min=1.8, retry=100, rollback=5),
     optimizer='mmff',
     optimizer_options={'max_iters': 100},
     seed=7,
@@ -119,7 +119,7 @@ monomers_array = [monomer.copy() for _ in range(20)]
 polymerizer = Polymerizer(
     monomers=monomers_array,
     random_rot=True,
-    dist_min=0.7,
+    dist_min=1.8,
     retry=100,
     rollback=5,
     retry_step=200,
@@ -220,7 +220,7 @@ from polymer_lib import OpenFFOptimizer
 
 optimizer = OpenFFOptimizer(
     forcefield='openff-2.1.0.offxml',
-    max_iters=50,
+    max_iters=1000,
     platform='CPU',
     charge_method='openff-gnn-am1bcc-1.0.0.pt'
 )
