@@ -16,7 +16,6 @@ dependencies:
   - openff-nagl
   - openff-nagl-models
   - openmm>=8
-  - openmmforcefields>=0.12
   - packmol
   - pytest>=7
   - pytest-cov>=4

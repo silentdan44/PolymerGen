@@ -1,5 +1,7 @@
 FROM mambaorg/micromamba:2.0.5
 
+ARG MAMBA_DOCKERFILE_ACTIVATE=1
+
 WORKDIR /app
 
 # The OpenFF environment file installs the project in editable mode, so the
@@ -9,5 +11,6 @@ COPY --chown=$MAMBA_USER:$MAMBA_USER . /app
 RUN micromamba env create --yes --file environment-openff.yml \
     && micromamba clean --all --yes
 
-ENTRYPOINT ["micromamba", "run", "--no-capture-output", "-n", "polymer-generator-openff"]
+ENV ENV_NAME=polymer-generator-openff
+
 CMD ["python", "-m", "pytest", "-q"]
