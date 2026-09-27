@@ -230,6 +230,8 @@ def _run_soft_push_off(
             system, integrator, openmm.Platform.getPlatformByName(platform)
         )
         context.setPositions(positions)
+        initial_amplitude = amplitude / stages
+        context.setParameter('push_off_amplitude', initial_amplitude)
         if soft_minimize:
             openmm.LocalEnergyMinimizer.minimize(
                 context,

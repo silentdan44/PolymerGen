@@ -146,14 +146,69 @@ push_off_chain(mol, *, forcefield='openff-2.1.0.offxml', steps=1000,
                minimize=True, max_iters=200, tolerance=10.0)
 ```
 
-Run this after `build_polymer` has assembled the complete chain and before packing. It returns a **copy** of the RDKit molecule with relaxed coordinates; the input object is unchanged. Requires the optional OpenFF/OpenMM/NAGL environment. By default, the chain is first minimized with the soft potential (`soft_minimize=True`), then `steps` and `stages` control the staged soft dynamics; `amplitude` is the maximum soft pair energy in kJ/mol. With `minimize=True`, physical OpenFF interactions are restored and a force-field minimization follows the push-off. Set `minimize=False` to return after the soft dynamics only.
+This is a separate relaxation step for a **completed, single polymer chain**. Run it after chain construction and before packing one or more chains into a box. It requires the optional OpenFF/OpenMM/NAGL environment. The function returns a **copy** of the input RDKit molecule with updated conformer coordinates; it does not mutate the input molecule.
+
+The workflow is:
+
+1. Convert the RDKit chain into an OpenFF molecule, assign NAGL partial charges, and parameterize it with the selected OpenFF force field.
+2. Keep bonded force-field terms active. Temporarily turn off the regular Lennard-Jones and electrostatic terms and add a finite, pairwise cosine repulsion:
+
+   ```text
+   U(r) = 0.5 * A * (1 + cos(pi * r / rc))   for r < rc
+   U(r) = 0                                  for r >= rc
+   rc   = cutoff_scale * (sigma_i + sigma_j) / 2
+   ```
+
+   Here `A` is the current repulsion amplitude and `sigma_i`, `sigma_j` are the atoms' Lennard-Jones size parameters from the selected force field. This potential has energy `A` at full overlap and smoothly reaches zero at its cutoff.
+3. By default, set the soft repulsion to its first amplitude level (`A=amplitude/stages`) and minimize the geometry under that soft system before starting dynamics. This lets the soft force begin resolving overlaps before velocities are assigned.
+4. Run Langevin dynamics in `stages` segments. At the start of each segment, increase `A` linearly from `amplitude/stages` through `amplitude`; the amplitude is held fixed during that segment. The total number of integration steps is `steps`, split as evenly as possible across segments.
+5. Restore the original OpenFF nonbonded parameters. By default, run a final energy minimization with the full physical force field.
+
+The soft-potential parameters are **not automatically fitted** to reproduce the force field. The selected force field supplies the LJ sigma values that set each pair's soft cutoff; `amplitude`, `cutoff_scale`, and the dynamics settings are protocol parameters supplied by this function or by the caller. Regular electrostatics and LJ energies are absent during the soft minimization and Langevin stages, and are restored for the final minimization.
+
+| Argument | Default | Meaning |
+| --- | ---: | --- |
+| `mol` | required | Completed RDKit molecule with explicit hydrogens and a 3D conformer. |
+| `forcefield` | `'openff-2.1.0.offxml'` | OpenFF force field used for parameterization and final minimization. |
+| `charge_method` | installed default NAGL model | Partial charge model. Set explicitly to choose another available NAGL model. |
+| `steps` | `1000` | Total Langevin integration steps. With the default 1 fs timestep this is 1 ps of dynamics. |
+| `stages` | `10` | Number of amplitude levels; default is 100 steps per level. Must be between 1 and `steps`. |
+| `temperature` | `300.0` K | Langevin thermostat temperature. |
+| `timestep` | `1.0` fs | Langevin integrator timestep. |
+| `friction` | `1.0` ps⁻¹ | Langevin friction coefficient. |
+| `amplitude` | `25.0` kJ/mol | Maximum energy of the soft pair interaction at `r=0`, reached in the last stage. |
+| `cutoff_scale` | `1.5` | Multiplier for the arithmetic mean of the pair's LJ sigma values. |
+| `seed` | `None` | Optional integer seed for the integrator and initial velocities. |
+| `platform` | `'CPU'` | OpenMM platform, such as `'CPU'` or `'CUDA'`. |
+| `soft_minimize` | `True` | Run minimization with the initial soft system before dynamics. |
+| `soft_minimize_max_iters` | `200` | Maximum soft-minimizer iterations. |
+| `soft_minimize_tolerance` | `10.0` kJ/(mol·nm) | Force tolerance for the soft minimizer. |
+| `minimize` | `True` | Run physical OpenFF minimization after dynamics and restoring nonbonded terms. |
+| `max_iters` | `200` | Maximum iterations for the final physical minimizer. |
+| `tolerance` | `10.0` kJ/(mol·nm) | Force tolerance for the final physical minimizer. |
+
+Setting `soft_minimize=False` skips the initial soft minimization. Setting `minimize=False` skips the final physical minimization and returns coordinates after soft dynamics; in that case, the physical interactions are still restored in the parameterized OpenMM system before it is discarded.
 
 ```python
 from polymer_lib import build_polymer, push_off_chain
 
-result = build_polymer('*CC(c1ccccc1)*', units=12, optimizer=None, seed=7)
-if result.success:
-    relaxed_chain = push_off_chain(result.molecule, steps=1000, seed=7)
+result = build_polymer(
+    '*CC(c1ccccc1)*', units=12, optimizer=None, seed=7,
+)
+if not result.success:
+    raise RuntimeError(result.failure_reason)
+
+relaxed_chain = push_off_chain(
+    result.molecule,
+    steps=1000,
+    stages=10,
+    amplitude=25.0,
+    seed=7,
+)
+
+# The packer accepts a list of relaxed RDKit molecules.
+from polymer_lib.packer import pack_chains
+topology = pack_chains([relaxed_chain], density=0.3)
 ```
 
 ```python
@@ -317,29 +372,7 @@ Polymerizer(
 - **MMFF94s:** `optimizer='mmff'`. Defaults: `max_iters=1000`, `variant='MMFF94s'`, `non_bonded_thresh=3.0 Å`. Example options: `optimizer_options={'max_iters': 1500, 'variant': 'MMFF94'}`. Nonconvergence rejects that candidate and invokes retry logic.
 - **OpenFF:** `optimizer='openff'` or an `OpenFFOptimizer` object. Constructor defaults: `forcefield='openff-2.1.0.offxml'`, `max_iters=50`, platform `CPU`, tolerance `10.0 kJ/(mol·nm)`, and the installed default NAGL charge model. Install the full environment to use it.
 
-For a completed chain, run a separate OpenMM soft push-off stage before passing it to packing. Build without a per-connection optimizer (`optimizer=None`), then pass the resulting molecule to `push_off_chain`. The function copies the molecule, retains bonded forces, temporarily replaces physical Lennard-Jones and electrostatic interactions with a finite cosine repulsion, and raises that repulsion over short Langevin-dynamics stages. By default, it restores the physical force field and minimizes the chain after the soft dynamics. See [`push_off_chain`](#push_off_chain) for all options.
-
-```python
-from polymer_lib import build_polymer, push_off_chain
-
-result = build_polymer(
-    '*CC(c1ccccc1)*',
-    units=12,
-    optimizer=None,
-    seed=7,
-)
-chain = push_off_chain(
-    result.molecule,
-    steps=1000,
-    stages=10,
-    amplitude=25.0,  # kJ/mol maximum per overlapping pair
-    temperature=300.0,  # K
-    seed=7,
-)
-# Pass `chain` to pack_chains([chain]) after relaxation.
-```
-
-`steps` is the total MD step count and is divided as evenly as possible among the stages. The cosine repulsion has a finite maximum at complete overlap and a pair cutoff based on the force-field Lennard-Jones sizes. `timestep` (fs), `friction` (1/ps), and `cutoff_scale` tune the dynamics and soft-core range. This is an overlap-relaxation stage, not a substitute for full physical equilibration.
+Use [`push_off_chain`](#push_off_chain) as an optional post-build step before packing. It performs overlap relaxation; it does not pack chains or replace full physical equilibration.
 - **None:** assemble and validate coordinates without energy minimization.
 
 You can pass a configured optimizer instance instead of a string:
