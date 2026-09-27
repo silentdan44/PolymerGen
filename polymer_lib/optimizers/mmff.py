@@ -18,7 +18,7 @@ class MMFFOptimizer(BaseOptimizer):
     non-biological organic molecules.
     """
 
-    def __init__(self, max_iters: int = 50, variant: str = 'MMFF94s',
+    def __init__(self, max_iters: int = 1000, variant: str = 'MMFF94s',
                  non_bonded_thresh: float = 3.0):
         """
         Args:
@@ -47,16 +47,19 @@ class MMFFOptimizer(BaseOptimizer):
             The same Mol, with coordinates updated in place.
         """
         try:
-            AllChem.MMFFOptimizeMolecule(
+            status = AllChem.MMFFOptimizeMolecule(
                 mol,
                 maxIters=self.max_iters,
                 mmffVariant=self.variant,
                 nonBondedThresh=self.non_bonded_thresh,
                 confId=confId
             )
+            if status != 0:
+                raise RuntimeError(
+                    f'MMFF optimization did not converge (status={status})'
+                )
         except Exception as e:
-            from ..utils import logger
-            logger.warning(f'MMFF optimization failed: {e}')
+            raise RuntimeError(f'MMFF optimization failed: {e}') from e
         return mol
 
     @property

@@ -149,13 +149,13 @@ class OpenFFOptimizer(BaseOptimizer):
         conf = mol.GetConformer(confId)
         positions = np.array(conf.GetPositions()) * unit.angstrom
 
-        # 7. Build OpenMM Context
+        # 7. Build final-force-field OpenMM Context
         integrator = openmm.VerletIntegrator(1.0 * unit.femtoseconds)
         platform = openmm.Platform.getPlatformByName(self.platform)
         context = openmm.Context(system, integrator, platform)
         context.setPositions(positions)
 
-        # 8. Minimize
+        # 8. Minimize with the OpenFF force field.
         LocalEnergyMinimizer.minimize(
             context,
             tolerance=self.tolerance * unit.kilojoules_per_mole / unit.nanometer,

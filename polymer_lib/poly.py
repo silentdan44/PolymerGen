@@ -6,13 +6,38 @@ Based on RadonPy 0.2.9
 import numpy as np
 from rdkit import Chem
 from rdkit import Geometry as Geom
+from scipy.spatial import cKDTree
 from . import calc
 from . import utils
 from .utils import logger
 
 
+_DENSE_CONTACT_CHECK_LIMIT = 500
+
+
+def _within_bond_distance(adjacency, start, target, max_distance):
+    """Return whether two atoms are connected by at most max_distance bonds."""
+    if start == target:
+        return True
+    seen = {start}
+    frontier = {start}
+    for _ in range(max_distance):
+        next_frontier = set()
+        for atom_idx in frontier:
+            for neighbor in adjacency[atom_idx]:
+                if neighbor == target:
+                    return True
+                if neighbor not in seen:
+                    seen.add(neighbor)
+                    next_frontier.add(neighbor)
+        frontier = next_frontier
+        if not frontier:
+            break
+    return False
+
+
 def set_linker_flag(mol, reverse=False, label=1):
-    flag = False
+    linker_indices = []
     mol.SetIntProp('head_idx', -1)
     mol.SetIntProp('tail_idx', -1)
     mol.SetIntProp('head_ne_idx', -1)
@@ -28,16 +53,17 @@ def set_linker_flag(mol, reverse=False, label=1):
            (atom.GetSymbol() == "*" and not atom.HasProp('ff_type')) or \
            (atom.HasProp('terminal') and atom.GetBoolProp('terminal')):
             atom.SetBoolProp('linker', True)
-            if not flag:
-                mol_head_idx = atom.GetIdx()
-                mol_tail_idx = atom.GetIdx()
-                flag = True
-            else:
-                if reverse:
-                    mol_head_idx = atom.GetIdx()
-                else:
-                    mol_tail_idx = atom.GetIdx()
-    if not flag:
+            linker_indices.append(atom.GetIdx())
+    if not linker_indices:
+        return False
+    # Assign the first/last linker as head/tail, preserving atom ordering.
+    mol_head_idx = linker_indices[0]
+    mol_tail_idx = linker_indices[-1]
+    if reverse and len(linker_indices) > 1:
+        mol_head_idx, mol_tail_idx = mol_tail_idx, mol_head_idx
+    if len(linker_indices) < 2 or \
+       len(mol.GetAtomWithIdx(mol_head_idx).GetNeighbors()) != 1 or \
+       len(mol.GetAtomWithIdx(mol_tail_idx).GetNeighbors()) != 1:
         return False
     mol.SetIntProp('head_idx', mol_head_idx)
     mol.GetAtomWithIdx(mol_head_idx).SetBoolProp('head', True)
@@ -107,7 +133,7 @@ def combine_mols(mol1, mol2, res_name_1='RU0', res_name_2='RU0'):
 def connect_mols(mol1, mol2, bond_length=1.5, dihedral=np.pi, random_rot=False,
                  set_linker=True, label1=1, label2=1,
                  confId1=0, confId2=0,
-                 res_name_1='RU0', res_name_2='RU0'):
+                 res_name_1='RU0', res_name_2='RU0', rng=None):
     """
     Connect tail atom in mol1 to head atom in mol2.
     Uses PROVEN WORKING LOGIC from RadonPy 0.2.9.
@@ -146,6 +172,8 @@ def connect_mols(mol1, mol2, bond_length=1.5, dihedral=np.pi, random_rot=False,
         mol2_coord_rot = calc.rotate_rod(mol2_coord, vcross, (np.pi - angle), center=center)
 
     # Translation mol2
+    # tail_vec points from the tail linker back into the existing chain, so
+    # continue growth in the opposite direction.
     trans = mol1_coord[mol1.GetIntProp('tail_ne_idx')] - (
         bond_length * mol1_tail_vec / np.linalg.norm(mol1_tail_vec)
     )
@@ -153,7 +181,8 @@ def connect_mols(mol1, mol2, bond_length=1.5, dihedral=np.pi, random_rot=False,
 
     # Rotation mol2 around new bond
     if random_rot:
-        dih = np.random.uniform(-np.pi, np.pi)
+        rng = np.random.default_rng() if rng is None else rng
+        dih = rng.uniform(-np.pi, np.pi)
     else:
         dih = calc.dihedral_coord(
             mol1_coord[mol1.GetIntProp('head_idx')],
@@ -200,7 +229,7 @@ def connect_mols(mol1, mol2, bond_length=1.5, dihedral=np.pi, random_rot=False,
     return mol
 
 
-def check_3d_proximity(coord1, coord2=None, dist_min=1.5, ignore_rad=3, dmat=None):
+def check_3d_proximity(coord1, coord2=None, dist_min=1.8, ignore_rad=3, dmat=None):
     if coord2 is not None:
         dist_matrix = calc.distance_matrix(coord1, coord2)
     else:
@@ -210,58 +239,79 @@ def check_3d_proximity(coord1, coord2=None, dist_min=1.5, ignore_rad=3, dmat=Non
     if dmat is not None:
         imat = np.where(dmat <= ignore_rad, np.nan, 1)
         dist_matrix = dist_matrix * imat
-
-    return np.nanmin(dist_matrix) > dist_min
+    finite = dist_matrix[~np.isnan(dist_matrix)]
+    return bool(finite.size == 0 or np.min(finite) > dist_min)
 
 
 def check_3d_bond_length(mol, confId=0, bond_s=2.7, bond_a=1.9, bond_d=1.8, bond_t=1.4):
     coord = np.array(mol.GetConformer(confId).GetPositions())
-    dist_matrix = calc.distance_matrix(coord)
-    check = True
+    bonds = list(mol.GetBonds())
+    if not bonds:
+        return True
+    begin = np.fromiter((b.GetBeginAtomIdx() for b in bonds), dtype=np.intp)
+    end = np.fromiter((b.GetEndAtomIdx() for b in bonds), dtype=np.intp)
+    orders = np.fromiter((b.GetBondTypeAsDouble() for b in bonds), dtype=float)
+    lengths = np.linalg.norm(coord[begin] - coord[end], axis=1)
 
-    for b in mol.GetBonds():
-        bond_l = dist_matrix[b.GetBeginAtom().GetIdx(), b.GetEndAtom().GetIdx()]
-        if b.GetBondTypeAsDouble() == 1.0 and bond_l > bond_s:
-            check = False
-            break
-        elif b.GetBondTypeAsDouble() == 1.5 and bond_l > bond_a:
-            check = False
-            break
-        elif b.GetBondTypeAsDouble() == 2.0 and bond_l > bond_d:
-            check = False
-            break
-        elif b.GetBondTypeAsDouble() == 3.0 and bond_l > bond_t:
-            check = False
-            break
-    return check
+    limits = np.select(
+        [orders == 1.0, orders == 1.5, orders == 2.0, orders == 3.0],
+        [bond_s, bond_a, bond_d, bond_t],
+        default=np.inf,
+    )
+    return bool(np.all(lengths <= limits))
 
 
-def check_3d_structure_poly(poly, mon, poly_dmat=None, dist_min=1.0, ignore_rad=3, check_bond_length=False):
+def check_3d_structure_poly(poly, mon, poly_dmat=None, dist_min=1.8, ignore_rad=3,
+                            check_bond_length=False, previous_atom_count=None,
+                            added_atom_indices=None, removed_head_idx=None):
     """
-    Improved 3D structure check with self-intersection detection.
+    Check all nonbonded heavy-atom contacts in the current polymer, including
+    contacts between atoms already present before the latest optimization.
     """
-    n_mon = mon.GetNumAtoms()
+    n_poly = poly.GetNumAtoms()
+    if n_poly == 0 or ignore_rad < 0:
+        return False
     coord = np.array(poly.GetConformer(0).GetPositions())
-    
-    # Split coordinates
-    p_coord = coord[:-n_mon]  # Polymer without last monomer
-    m_coord = coord[-n_mon:]  # Last monomer
-    
-    # Check 1: Proximity between polymer and new monomer
-    if poly_dmat is not None:
-        poly_dmat_sliced = poly_dmat[:-n_mon, -n_mon:]
+    if coord.shape[0] != n_poly:
+        return False
+    adjacency = [[] for _ in range(n_poly)]
+    for bond in poly.GetBonds():
+        a, b = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+        adjacency[a].append(b)
+        adjacency[b].append(a)
+
+    # Exclude only pairs with a short covalent path. Atom index proximity is
+    # unrelated to chemical connectivity and can hide real clashes.
+    heavy_indices = [
+        atom.GetIdx() for atom in poly.GetAtoms() if atom.GetSymbol() != 'H'
+    ]
+    heavy_coord = coord[heavy_indices]
+    if len(heavy_indices) < 2:
+        check = True
+        return check_3d_bond_length(poly) if check_bond_length else check
+
+    if len(heavy_indices) <= _DENSE_CONTACT_CHECK_LIMIT:
+        # For small molecules, scipy's dense cdist has lower overhead than
+        # building a spatial tree. Keep the sparse search for longer chains.
+        distances = calc.distance_matrix(heavy_coord)
+        close_pairs = np.argwhere(np.triu(distances <= dist_min, k=1))
     else:
-        poly_dmat_sliced = None
-    
-    check = check_3d_proximity(p_coord, coord2=m_coord, dist_min=dist_min, 
-                               dmat=poly_dmat_sliced, ignore_rad=ignore_rad)
-    
-    # Check 2: Self-intersection within the new monomer (if it's large)
-    if check and n_mon > 10:
-        check = check_3d_proximity(m_coord, coord2=None, dist_min=dist_min, ignore_rad=ignore_rad)
-    
-    # Check 3: Bond lengths
+        # Query only pairs that could violate the cutoff instead of allocating
+        # a dense N-by-N distance matrix for long chains.
+        close_pairs = cKDTree(heavy_coord).query_pairs(
+            dist_min, output_type='ndarray'
+        )
+    check = all(
+        _within_bond_distance(
+            adjacency,
+            heavy_indices[int(pair[0])],
+            heavy_indices[int(pair[1])],
+            ignore_rad,
+        )
+        for pair in close_pairs
+    )
+
+    # Bond lengths are validated on the whole current chain as well.
     if check and check_bond_length:
         check = check_3d_bond_length(poly)
-    
     return check
