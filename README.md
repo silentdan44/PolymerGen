@@ -295,6 +295,28 @@ Polymerizer(
 
 - **MMFF94s:** `optimizer='mmff'`. Defaults: `max_iters=1000`, `variant='MMFF94s'`, `non_bonded_thresh=3.0 Å`. Example options: `optimizer_options={'max_iters': 1500, 'variant': 'MMFF94'}`. Nonconvergence rejects that candidate and invokes retry logic.
 - **OpenFF:** `optimizer='openff'` or an `OpenFFOptimizer` object. Constructor defaults: `forcefield='openff-2.1.0.offxml'`, `max_iters=50`, platform `CPU`, tolerance `10.0 kJ/(mol·nm)`, and the installed default NAGL charge model. Install the full environment to use it.
+
+OpenFF can optionally run an OpenMM soft push-off before minimization. It retains bonded forces, temporarily replaces the physical Lennard-Jones and electrostatic terms with a finite cosine repulsion, and raises that repulsion over short Langevin-dynamics stages. Then it restores the original force-field interactions and runs the standard minimizer. The push-off is disabled by default (`push_off_steps=0`); enable it with a positive step count:
+
+```python
+from polymer_lib import build_polymer
+
+result = build_polymer(
+    '*CC(c1ccccc1)*',
+    units=12,
+    optimizer='openff',
+    optimizer_options={
+        'push_off_steps': 1000,
+        'push_off_stages': 10,
+        'push_off_amplitude': 25.0,  # kJ/mol maximum per overlapping pair
+        'push_off_temperature': 300.0,  # K
+        'push_off_seed': 7,
+    },
+    seed=7,
+)
+```
+
+`push_off_steps` is the total MD step count and is divided as evenly as possible among the stages. The cosine repulsion has a finite maximum at complete overlap and a pair cutoff based on the force-field Lennard-Jones sizes. `push_off_timestep` (fs), `push_off_friction` (1/ps), and `push_off_cutoff_scale` can adjust the dynamics and soft-core range. This is an overlap-relaxation stage, not a substitute for full physical equilibration.
 - **None:** assemble and validate coordinates without energy minimization.
 
 You can pass a configured optimizer instance instead of a string:
