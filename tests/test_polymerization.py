@@ -351,7 +351,7 @@ def test_conformer_pools_are_reproducible_and_preserve_input():
     assert np.array_equal(monomer.mol.GetConformer().GetPositions(), original)
 
 
-def test_failed_attempt_uses_next_prepared_conformer(monkeypatch):
+def test_failed_attempt_reuses_conformer_for_same_growth_step(monkeypatch):
     from polymer_lib import poly
     monomer = Monomer(POLYSTYRENE, seed=42)
     seen = []
@@ -370,10 +370,10 @@ def test_failed_attempt_uses_next_prepared_conformer(monkeypatch):
                          conformer_count=4).build()
     assert result.success
     assert len(seen) >= 2
-    assert not np.allclose(seen[0], seen[1])
+    assert np.allclose(seen[0], seen[1])
 
 
-def test_rollback_to_start_switches_first_monomer(monkeypatch):
+def test_rollback_to_start_draws_initial_monomer_again(monkeypatch):
     from polymer_lib import poly
     monomer = Monomer(POLYSTYRENE, seed=42)
     starts = []
@@ -411,3 +411,27 @@ def test_alternative_embedding_failure_keeps_supplied_geometry(monkeypatch):
     pools = polymerizer._prepare_conformer_pools()
     assert len(pools[0]) == 1
     assert np.array_equal(pools[0][0], monomer.mol.GetConformer().GetPositions())
+
+
+def test_random_conformer_is_selected_at_every_growth_step(monkeypatch):
+    from polymer_lib import poly
+    monomer = Monomer(POLYSTYRENE, seed=42)
+    polymerizer = Polymerizer([monomer] * 6, seed=42, optimizer=None,
+                             conformer_count=4)
+    pools = polymerizer._prepare_conformer_pools()
+    observed = []
+    original_connect = poly.connect_mols
+
+    def record(first, second, **kwargs):
+        coords = np.array(second.GetConformer().GetPositions())
+        candidates = pools[len(observed) + 1]
+        matches = [i for i, candidate in enumerate(candidates)
+                   if np.allclose(coords, candidate)]
+        assert len(matches) == 1
+        observed.append(matches[0])
+        return original_connect(first, second, **kwargs)
+
+    monkeypatch.setattr(poly, 'connect_mols', record)
+    monkeypatch.setattr(poly, 'check_3d_structure_poly', lambda *args, **kwargs: True)
+    assert polymerizer.build().success
+    assert observed == [1, 3, 2, 3, 0]

@@ -96,7 +96,7 @@ Build a chain from one repeat-unit SMILES. The SMILES must contain exactly two `
 | `push_off_options` | Optional dictionary of `push_off_chain` keyword arguments. |
 | `conformer_count` | Number of precomputed monomer conformations, including the supplied geometry; default `4`. Use `1` for the original single-conformer behavior. |
 
-The generator prepares and reuses alternative conformations for each distinct monomer graph and stereochemistry. It tries different conformations during growth and switches the initial monomer after a rollback to the start. A fixed seed makes preparation and selection reproducible within a given environment; a failed embedding is reported and the remaining conformations are used. Multiple conformations do not guarantee successful growth.
+The generator prepares and reuses alternative conformations for each distinct monomer graph and stereochemistry. At each growth step the next monomer conformation is drawn uniformly at random from the available pool. Rotation retries within that step use the same conformation; after a rollback a new conformation is drawn when growth resumes. The supplied initial monomer geometry is used first; after a rollback to the start it is drawn from its pool. Draws are independent and may repeat. A fixed seed makes preparation and selection reproducible within a given environment; a failed embedding is reported and the remaining conformations are used. Multiple conformations do not guarantee successful growth.
 
 Returns `BuildResult`. Invalid SMILES, linkers, unit counts, or options raise exceptions. Exhausting retries returns a result with `success == False` and a `failure_reason`.
 

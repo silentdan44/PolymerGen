@@ -257,6 +257,7 @@ class Polymerizer:
         self._last_rollbacks = 0
         self._last_failure_reason = None
         rng = np.random.default_rng(self.seed)
+        conformer_rng = np.random.default_rng(np.random.SeedSequence(self.seed).spawn(1)[0])
         conformer_pools = self._prepare_conformer_pools()
 
         t0 = time.time()
@@ -284,10 +285,10 @@ class Polymerizer:
                 removed_head_idx = piece.GetIntProp('head_idx')
                 expected_atom_count = previous_atom_count + piece.GetNumAtoms() - 2
                 success = False
+                pool = conformer_pools[step + 1]
+                self._set_conformer_coordinates(piece, pool[int(conformer_rng.integers(len(pool)))])
 
                 for attempt in range(self.retry_step):
-                    pool = conformer_pools[step + 1]
-                    self._set_conformer_coordinates(piece, pool[(attempt + total_rollbacks) % len(pool)])
                     total_attempts += 1
                     self._last_attempts += 1
                     poly_trial = poly.connect_mols(
@@ -391,7 +392,7 @@ class Polymerizer:
                 poly_mol = utils.deepcopy_mol(poly_history[history_index])
                 if start_step == 0:
                     first_pool = conformer_pools[0]
-                    self._set_conformer_coordinates(poly_mol, first_pool[total_rollbacks % len(first_pool)])
+                    self._set_conformer_coordinates(poly_mol, first_pool[int(conformer_rng.integers(len(first_pool)))])
                     poly_history[history_index] = utils.deepcopy_mol(poly_mol)
                 poly_history = poly_history[:history_index + 1]
 
