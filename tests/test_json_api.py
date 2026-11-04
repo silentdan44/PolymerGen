@@ -136,3 +136,18 @@ def test_pdb_output_normalizes_numeric_residue_identifiers():
     api._write_pdb(topology, [[0, 0, 0]] * unit.nanometer, output)
     assert 'ATOM' in output.getvalue() or 'HETATM' in output.getvalue()
     assert residue.id == '1'
+
+
+def test_pack_timeout_returns_actionable_error(monkeypatch):
+    from polymer_lib.packer import PackmolPacker
+    mol = Chem.AddHs(Chem.MolFromSmiles('CC'))
+    assert AllChem.EmbedMolecule(mol, randomSeed=11) == 0
+    def fail(self, chains):
+        raise RuntimeError('Packmol timed out; try a longer timeout')
+    monkeypatch.setattr(PackmolPacker, 'pack', fail)
+    response = api.handle_request(_request('pack', {
+        'molecules': [{'format': 'mol', 'data': Chem.MolToMolBlock(mol)}],
+        'timeout': 2, 'seed': 1,
+    }))
+    assert response['error']['code'] == 'PACKING_FAILED'
+    assert 'timed out' in response['error']['message']

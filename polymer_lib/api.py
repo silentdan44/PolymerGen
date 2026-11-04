@@ -155,12 +155,12 @@ def _write_pdb(topology, positions, output):
 
 
 def _pack(payload: dict) -> dict:
-    _validate_keys(payload, {"molecules", "density", "max_attempts", "tolerance"}, "input")
+    _validate_keys(payload, {"molecules", "density", "max_attempts", "tolerance", "timeout", "seed"}, "input")
     molecules = payload.get("molecules")
     if not isinstance(molecules, list) or not molecules:
         raise APIRequestError("INVALID_INPUT", "input.molecules must be a nonempty list")
     mols = [_molecule_from_input(item, f"input.molecules[{i}]") for i, item in enumerate(molecules)]
-    options = {key: payload[key] for key in ("density", "max_attempts", "tolerance") if key in payload}
+    options = {key: payload[key] for key in ("density", "max_attempts", "tolerance", "timeout", "seed") if key in payload}
     try:
         from .packer import PackmolPacker
 
@@ -177,11 +177,14 @@ def _pack(payload: dict) -> dict:
         raise APIRequestError("INVALID_INPUT", str(exc)) from exc
     except ImportError as exc:
         raise APIRequestError("DEPENDENCY_UNAVAILABLE", str(exc)) from exc
+    except RuntimeError as exc:
+        raise APIRequestError("PACKING_FAILED", str(exc)) from exc
     return {
         "topology": {"format": "openff-topology-json", "data": topology_json},
         "structure": {"format": "pdb", "data": pdb_file.getvalue()},
         "properties": {"molecules": len(mols), "atoms": topology.n_atoms,
-                       "initial_density_g_ml": packer.effective_density},
+                       "initial_density_g_ml": packer.effective_density,
+                       "packmol_density_g_ml": packer.initial_pack_density},
     }
 
 
