@@ -29,6 +29,7 @@ class BuildConfig:
     rollback: int = 5
     retry_step: int = 200
     check_bond_length: bool = True
+    conformer_count: int = 4
     tacticity: object = 'atactic'
     tacticity_center: int = None
 
@@ -37,6 +38,8 @@ class BuildConfig:
             raise ValueError('bond_length must be > 0 and dist_min must be >= 0')
         if self.retry < 0 or self.retry_step < 1 or self.rollback < 0:
             raise ValueError('retry and rollback must be >= 0 and retry_step must be >= 1')
+        if isinstance(self.conformer_count, bool) or not isinstance(self.conformer_count, int) or self.conformer_count < 1:
+            raise ValueError('conformer_count must be a positive integer')
         _validate_tacticity(self.tacticity)
         if not isinstance(self.tacticity, str):
             object.__setattr__(self, 'tacticity', tuple(self.tacticity))
@@ -83,7 +86,7 @@ class Polymerizer:
                  dist_min=1.8, retry=100, rollback=5, retry_step=200,
                  check_bond_length=True, optimizer=None, optimizer_options=None,
                  config=None, seed=None, tacticity='atactic', tacticity_center=None,
-                 push_off_options=None):
+                 push_off_options=None, conformer_count=4):
         """
         Initialize the Polymerizer.
 
@@ -97,6 +100,8 @@ class Polymerizer:
             rollback: Number of steps to roll back on failure.
             retry_step: Max attempts per polymerization step.
             check_bond_length: If True, also validate bond lengths.
+            conformer_count: Number of prepared conformers per monomer type,
+                including the supplied geometry (default 4).
             optimizer: Structure optimizer. Can be:
                 - None (no optimization)
                 - A BaseOptimizer instance (e.g. MMFFOptimizer)
@@ -114,6 +119,7 @@ class Polymerizer:
             rollback = config.rollback
             retry_step = config.retry_step
             check_bond_length = config.check_bond_length
+            conformer_count = config.conformer_count
             tacticity = config.tacticity
             tacticity_center = config.tacticity_center
         if push_off_options is not None and not isinstance(push_off_options, dict):
@@ -130,6 +136,9 @@ class Polymerizer:
         self.retry_step = retry_step
         self.check_bond_length = check_bond_length
         self.seed = seed
+        if isinstance(conformer_count, bool) or not isinstance(conformer_count, int) or conformer_count < 1:
+            raise ValueError('conformer_count must be a positive integer')
+        self.conformer_count = conformer_count
         _validate_tacticity(tacticity)
         self.tacticity = tacticity if isinstance(tacticity, str) else tuple(tacticity)
         if tacticity_center is not None and (
@@ -194,6 +203,45 @@ class Polymerizer:
             return get_optimizer(name, **opts)
         raise ValueError(f"Invalid optimizer type: {type(optimizer)}")
 
+    def _prepare_conformer_pools(self):
+        """Prepare reusable coordinate pools for each ordered monomer graph."""
+        from rdkit import Chem
+        from rdkit.Chem import AllChem
+
+        rng = np.random.default_rng(self.seed)
+        cache = {}
+        pools = []
+        for monomer in self.monomers:
+            mol = monomer.mol
+            atoms = tuple((a.GetAtomicNum(), a.GetIsotope(), a.GetFormalCharge(),
+                           int(a.GetChiralTag()), a.GetIsAromatic()) for a in mol.GetAtoms())
+            bonds = tuple((b.GetBeginAtomIdx(), b.GetEndAtomIdx(), str(b.GetBondType()),
+                           int(b.GetStereo())) for b in mol.GetBonds())
+            key = (atoms, bonds)
+            if key not in cache:
+                generated = []
+                for _ in range(self.conformer_count - 1 if self.n > 1 else 0):
+                    candidate = Chem.Mol(mol)
+                    candidate.RemoveAllConformers()
+                    params = AllChem.ETKDGv3()
+                    params.enforceChirality = True
+                    params.randomSeed = int(rng.integers(1, 2**31 - 1))
+                    if AllChem.EmbedMolecule(candidate, params) != 0:
+                        params.useRandomCoords = True
+                        if AllChem.EmbedMolecule(candidate, params) != 0:
+                            logger.warning('Could not generate an additional monomer conformer')
+                            continue
+                    generated.append(np.array(candidate.GetConformer().GetPositions(), copy=True))
+                cache[key] = generated
+            pools.append([np.array(mol.GetConformer().GetPositions(), copy=True), *cache[key]])
+        return pools
+
+    @staticmethod
+    def _set_conformer_coordinates(mol, coordinates):
+        conformer = mol.GetConformer()
+        for index, xyz in enumerate(coordinates):
+            conformer.SetAtomPosition(index, xyz.tolist())
+
     def _build_raw_mol(self):
         """
         Run the polymerization process and return the final polymer Mol.
@@ -209,6 +257,7 @@ class Polymerizer:
         self._last_rollbacks = 0
         self._last_failure_reason = None
         rng = np.random.default_rng(self.seed)
+        conformer_pools = self._prepare_conformer_pools()
 
         t0 = time.time()
         logger.info(f'Start polymerization: n={self.n}')
@@ -237,6 +286,8 @@ class Polymerizer:
                 success = False
 
                 for attempt in range(self.retry_step):
+                    pool = conformer_pools[step + 1]
+                    self._set_conformer_coordinates(piece, pool[(attempt + total_rollbacks) % len(pool)])
                     total_attempts += 1
                     self._last_attempts += 1
                     poly_trial = poly.connect_mols(
@@ -338,6 +389,10 @@ class Polymerizer:
                 )
 
                 poly_mol = utils.deepcopy_mol(poly_history[history_index])
+                if start_step == 0:
+                    first_pool = conformer_pools[0]
+                    self._set_conformer_coordinates(poly_mol, first_pool[total_rollbacks % len(first_pool)])
+                    poly_history[history_index] = utils.deepcopy_mol(poly_mol)
                 poly_history = poly_history[:history_index + 1]
 
         elapsed = time.time() - t0
@@ -520,7 +575,7 @@ class BuildResult:
 def build_polymer(smiles, units=_UNSET, *, target_atoms=_UNSET, tacticity='atactic',
                   tacticity_center=None,
                   optimizer='mmff', optimizer_options=None, config=None, seed=None,
-                  push_off_options=None):
+                  push_off_options=None, conformer_count=4):
     """Build a polymer by repeat count or approximate final atom count."""
     units_given = units is not _UNSET
     target_atoms_given = target_atoms is not _UNSET
@@ -546,6 +601,7 @@ def build_polymer(smiles, units=_UNSET, *, target_atoms=_UNSET, tacticity='atact
             tacticity=tacticity,
             tacticity_center=tacticity_center,
             push_off_options=push_off_options,
+            conformer_count=conformer_count,
         )
         return polymerizer.build()
     if not isinstance(units, int) or units < 1:
@@ -560,5 +616,6 @@ def build_polymer(smiles, units=_UNSET, *, target_atoms=_UNSET, tacticity='atact
         tacticity=tacticity,
         tacticity_center=tacticity_center,
         push_off_options=push_off_options,
+        conformer_count=conformer_count,
     )
     return polymerizer.build()

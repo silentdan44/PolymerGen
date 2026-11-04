@@ -77,7 +77,7 @@ This section documents the public entry points and their return values. Distance
 build_polymer(smiles, units=None, *, target_atoms=None, tacticity='atactic',
               tacticity_center=None,
               optimizer='mmff', optimizer_options=None, config=None, seed=None,
-              push_off_options=None)
+              push_off_options=None, conformer_count=4)
 ```
 
 Build a chain from one repeat-unit SMILES. The SMILES must contain exactly two `*` atoms for head and tail connection points. Specify either `units` (the repeat-unit count) or `target_atoms` (an approximate final atom count); target counts are rounded up to a whole number of repeat units.
@@ -94,6 +94,9 @@ Build a chain from one repeat-unit SMILES. The SMILES must contain exactly two `
 | `config` | Optional `BuildConfig` for geometry and retry settings. |
 | `seed` | Integer seed for initial conformer, growth rotations and push-off unless overridden; RDKit accepts 0 through 2³¹−1. |
 | `push_off_options` | Optional dictionary of `push_off_chain` keyword arguments. |
+| `conformer_count` | Number of precomputed monomer conformations, including the supplied geometry; default `4`. Use `1` for the original single-conformer behavior. |
+
+The generator prepares and reuses alternative conformations for each distinct monomer graph and stereochemistry. It tries different conformations during growth and switches the initial monomer after a rollback to the start. A fixed seed makes preparation and selection reproducible within a given environment; a failed embedding is reported and the remaining conformations are used. Multiple conformations do not guarantee successful growth.
 
 Returns `BuildResult`. Invalid SMILES, linkers, unit counts, or options raise exceptions. Exhausting retries returns a result with `success == False` and a `failure_reason`.
 
@@ -269,6 +272,7 @@ Every field is optional. These are the defaults:
 | `rollback` | `5` | Successful growth steps to undo after a failed step. |
 | `retry_step` | `200` | Candidate connections allowed at each step. |
 | `check_bond_length` | `True` | Apply the built-in bond-length sanity check after each candidate. |
+| `conformer_count` | `4` | Number of prepared conformations per monomer type, including the supplied coordinates. |
 | `tacticity` | `'atactic'` | Backbone stereochemistry: `'atactic'`, `'isotactic'`, `'syndiotactic'`, or a `+`/`-` sequence. |
 | `tacticity_center` | `None` | Monomer atom index for the polymerization stereocenter; defaults to the atom next to the tail linker. |
 
@@ -316,6 +320,7 @@ Polymerizer(
     retry_step=200, check_bond_length=True,
     optimizer=None, optimizer_options=None, config=None, seed=None,
     tacticity='atactic', tacticity_center=None, push_off_options=None,
+    conformer_count=4,
 )
 ```
 
@@ -368,7 +373,7 @@ The API contract is versioned and uses one request and one response per JSONL li
 }
 ```
 
-`request_id` is optional; when provided, it is echoed in the response. The `input` fields depend on `action`; unknown fields are rejected to catch misspellings. Exactly one `units` or `target_atoms` is required for `build`, matching the Python API. `tacticity` accepts `atactic`, `isotactic`, `syndiotactic`, or a `+`/`-` sequence. The optimizer can be `"mmff"`, `"openff"`, or `null`; `optimizer_options` is an object of optimizer-specific options. Optional `config` maps to `BuildConfig` and can set `bond_length`, `dihedral`, `random_rot`, `dist_min`, `retry`, `rollback`, `retry_step`, and `check_bond_length` (as well as `tacticity` and `tacticity_center`).
+`request_id` is optional; when provided, it is echoed in the response. The `input` fields depend on `action`; unknown fields are rejected to catch misspellings. Exactly one `units` or `target_atoms` is required for `build`, matching the Python API. `tacticity` accepts `atactic`, `isotactic`, `syndiotactic`, or a `+`/`-` sequence. Optional `conformer_count` sets the size of the prepared monomer conformer pool. The optimizer can be `"mmff"`, `"openff"`, or `null`; `optimizer_options` is an object of optimizer-specific options. Optional `config` maps to `BuildConfig` and can set `bond_length`, `dihedral`, `random_rot`, `dist_min`, `retry`, `rollback`, `retry_step`, `check_bond_length`, and `conformer_count` (as well as `tacticity` and `tacticity_center`).
 
 Successful responses have `ok: true` and a `result`; failures have `ok: false` and a stable `error.code` plus a human-readable `error.message`. Result coordinates are self-contained text payloads, so clients need not share a filesystem with the container.
 

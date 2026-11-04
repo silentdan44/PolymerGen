@@ -335,3 +335,79 @@ def test_build_runs_push_off_once_with_options(monkeypatch):
     assert result.success
     assert result.raw_molecule is not result.molecule
     assert calls == [{'steps': 4, 'seed': 19}]
+
+
+def test_conformer_pools_are_reproducible_and_preserve_input():
+    monomer = Monomer(POLYSTYRENE, seed=42)
+    original = np.array(monomer.mol.GetConformer().GetPositions())
+    first = Polymerizer([monomer, monomer], seed=42, conformer_count=4)
+    second = Polymerizer([monomer, monomer], seed=42, conformer_count=4)
+    pools = first._prepare_conformer_pools()
+    repeated = second._prepare_conformer_pools()
+    assert len(pools[0]) == 4
+    assert np.array_equal(pools[0][0], original)
+    assert all(np.array_equal(a, b) for a, b in zip(pools[0], repeated[0]))
+    assert not np.allclose(pools[0][0], pools[0][1])
+    assert np.array_equal(monomer.mol.GetConformer().GetPositions(), original)
+
+
+def test_failed_attempt_uses_next_prepared_conformer(monkeypatch):
+    from polymer_lib import poly
+    monomer = Monomer(POLYSTYRENE, seed=42)
+    seen = []
+    connect = poly.connect_mols
+    check = poly.check_3d_structure_poly
+    def record(first, second, **kwargs):
+        seen.append(np.array(second.GetConformer().GetPositions()))
+        return connect(first, second, **kwargs)
+    def reject_first(*args, **kwargs):
+        if len(seen) == 1:
+            return False
+        return check(*args, **kwargs)
+    monkeypatch.setattr(poly, 'connect_mols', record)
+    monkeypatch.setattr(poly, 'check_3d_structure_poly', reject_first)
+    result = Polymerizer([monomer, monomer], seed=42, optimizer=None,
+                         conformer_count=4).build()
+    assert result.success
+    assert len(seen) >= 2
+    assert not np.allclose(seen[0], seen[1])
+
+
+def test_rollback_to_start_switches_first_monomer(monkeypatch):
+    from polymer_lib import poly
+    monomer = Monomer(POLYSTYRENE, seed=42)
+    starts = []
+    connect = poly.connect_mols
+    def record(first, second, **kwargs):
+        starts.append(np.array(first.GetConformer().GetPositions()))
+        return connect(first, second, **kwargs)
+    monkeypatch.setattr(poly, 'connect_mols', record)
+    monkeypatch.setattr(poly, 'check_3d_structure_poly', lambda *args, **kwargs: len(starts) > 1)
+    result = Polymerizer([monomer, monomer], seed=42, optimizer=None,
+                         conformer_count=4, retry_step=1, retry=1).build()
+    assert result.success
+    assert not np.allclose(starts[0], starts[1])
+
+
+@pytest.mark.parametrize('value', [0, -1, True, 1.5])
+def test_conformer_count_must_be_positive_integer(value):
+    with pytest.raises(ValueError, match='conformer_count'):
+        BuildConfig(conformer_count=value)
+
+
+def test_one_conformer_uses_original_geometry_only():
+    monomer = Monomer(POLYSTYRENE, seed=42)
+    polymerizer = Polymerizer([monomer, monomer], seed=42, conformer_count=1)
+    pools = polymerizer._prepare_conformer_pools()
+    assert all(len(pool) == 1 for pool in pools)
+    assert np.array_equal(pools[0][0], monomer.mol.GetConformer().GetPositions())
+
+
+def test_alternative_embedding_failure_keeps_supplied_geometry(monkeypatch):
+    from rdkit.Chem import AllChem
+    monomer = Monomer(POLYSTYRENE, seed=42)
+    monkeypatch.setattr(AllChem, 'EmbedMolecule', lambda *args, **kwargs: -1)
+    polymerizer = Polymerizer([monomer, monomer], seed=42, conformer_count=3)
+    pools = polymerizer._prepare_conformer_pools()
+    assert len(pools[0]) == 1
+    assert np.array_equal(pools[0][0], monomer.mol.GetConformer().GetPositions())

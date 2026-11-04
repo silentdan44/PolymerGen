@@ -26,6 +26,7 @@ def test_build_request_returns_mol_block_and_diagnostics(monkeypatch):
         "units": 2,
         "tacticity": "isotactic",
         "seed": 4,
+        "conformer_count": 3,
     }
 
     def fake_build(smiles, **kwargs):
