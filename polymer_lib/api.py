@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+from collections import Counter, defaultdict
 import json
 import logging
 import re
@@ -151,6 +152,27 @@ def _write_pdb(topology, positions, output):
         chain.id = str(chain.id)
         for residue in chain.residues():
             residue.id = str(residue.id)
+            atoms = list(residue.atoms())
+            names = [atom.name.strip()[:4] for atom in atoms]
+            counts = Counter(names)
+            used = {name for atom, name in zip(atoms, names)
+                    if name and len(atom.name.strip()) <= 4 and counts[name] == 1}
+            numbers = defaultdict(int)
+            alphabet = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+            for atom, name in zip(atoms, names):
+                if name and len(atom.name.strip()) <= 4 and counts[name] == 1:
+                    continue
+                prefix = atom.element.symbol[0].upper() if atom.element is not None else 'X'
+                while True:
+                    value = numbers[prefix]
+                    numbers[prefix] += 1
+                    if value >= 36**3:
+                        raise ValueError(f'Too many atoms with prefix {prefix} in one PDB residue')
+                    candidate = prefix + ''.join(alphabet[(value // place) % 36] for place in (1296, 36, 1))
+                    if candidate not in used:
+                        atom.name = candidate
+                        used.add(candidate)
+                        break
     PDBFile.writeFile(topology, positions, output, keepIds=True)
 
 

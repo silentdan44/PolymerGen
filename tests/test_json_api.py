@@ -151,3 +151,22 @@ def test_pack_timeout_returns_actionable_error(monkeypatch):
     }))
     assert response['error']['code'] == 'PACKING_FAILED'
     assert 'timed out' in response['error']['message']
+
+
+def test_pdb_output_preserves_all_atoms_with_long_duplicate_names():
+    from openmm import unit
+    from openmm.app import PDBFile, Topology, element
+
+    topology = Topology()
+    chain = topology.addChain('A')
+    residue = topology.addResidue('UNK', chain, id='1')
+    for index in range(2500):
+        topology.addAtom(f'C{index:06}', element.carbon, residue)
+    positions = [[0, 0, 0] for _ in range(2500)] * unit.nanometer
+    output = io.StringIO()
+    api._write_pdb(topology, positions, output)
+    reloaded = PDBFile(io.StringIO(output.getvalue()))
+    assert reloaded.topology.getNumAtoms() == 2500
+    names = [atom.name for atom in reloaded.topology.atoms()]
+    assert len(set(names)) == 2500
+    assert all(atom.element == element.carbon for atom in reloaded.topology.atoms())
