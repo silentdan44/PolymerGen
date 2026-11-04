@@ -140,6 +140,19 @@ def _push_off(payload: dict) -> dict:
     }
 
 
+def _write_pdb(topology, positions, output):
+    """Write OpenMM topology with normalized chain and residue identifiers."""
+    from openmm.app import PDBFile
+
+    # OpenFF may carry PDB residue numbers as integers; OpenMM expects strings
+    # when keepIds is enabled. This topology is a fresh OpenMM conversion.
+    for chain in topology.chains():
+        chain.id = str(chain.id)
+        for residue in chain.residues():
+            residue.id = str(residue.id)
+    PDBFile.writeFile(topology, positions, output, keepIds=True)
+
+
 def _pack(payload: dict) -> dict:
     _validate_keys(payload, {"molecules", "density", "max_attempts", "tolerance"}, "input")
     molecules = payload.get("molecules")
@@ -154,10 +167,8 @@ def _pack(payload: dict) -> dict:
         topology = packer.pack(mols)
         openmm_topology = topology.to_openmm()
         positions = topology.get_positions().to_openmm()
-        from openmm.app import PDBFile
-
         pdb_file = io.StringIO()
-        PDBFile.writeFile(openmm_topology, positions, pdb_file, keepIds=True)
+        _write_pdb(openmm_topology, positions, pdb_file)
         topology_json = topology.to_json()
         # Validate that this OpenFF version emitted JSON before putting it on the wire.
         json.loads(topology_json)

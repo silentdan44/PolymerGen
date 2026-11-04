@@ -121,3 +121,18 @@ def test_runner_handles_multiple_jsonl_requests_and_malformed_json(monkeypatch, 
     assert responses[0]["error"]["code"] == "UNKNOWN_ACTION"
     assert responses[1]["error"]["code"] == "INVALID_JSON"
     assert responses[2]["error"]["code"] == "UNKNOWN_ACTION"
+
+
+def test_pdb_output_normalizes_numeric_residue_identifiers():
+    from openmm import unit
+    from openmm.app import Topology, element
+
+    topology = Topology()
+    chain = topology.addChain('A')
+    residue = topology.addResidue('UNK', chain, id='1')
+    topology.addAtom('C', element.carbon, residue)
+    residue.id = 1
+    output = io.StringIO()
+    api._write_pdb(topology, [[0, 0, 0]] * unit.nanometer, output)
+    assert 'ATOM' in output.getvalue() or 'HETATM' in output.getvalue()
+    assert residue.id == '1'
