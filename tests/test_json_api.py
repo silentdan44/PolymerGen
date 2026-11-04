@@ -70,60 +70,37 @@ def test_unknown_input_keys_are_rejected():
     assert "unit" in response["error"]["message"]
 
 
-def test_composed_action_runs_build_push_off_and_pack(monkeypatch):
+def test_composed_action_runs_one_build_with_push_off_options_per_chain(monkeypatch):
     calls = []
-
     def fake_build(payload):
-        calls.append("build")
-        seed = payload.get("seed")
-        return {
-            "molecule": {"format": "mol", "data": f"chain-{seed}"},
-            "diagnostics": {"attempts": 1, "rollbacks": 0, "elapsed_seconds": 0.1},
-        }
-
-    def fake_push_off(payload):
-        calls.append("push_off")
-        return {"molecule": {"format": "mol", "data": f"relaxed-{payload['molecule']['data']}"}}
-
+        calls.append(payload)
+        seed = payload['seed']
+        return {"molecule": {"format": "mol", "data": f"relaxed-{seed}"},
+                "unrelaxed_molecule": {"format": "mol", "data": f"raw-{seed}"},
+                "diagnostics": {}}
     def fake_pack(payload):
-        calls.append("pack")
-        assert len(payload["molecules"]) == 2
+        assert [m['data'] for m in payload['molecules']] == ['relaxed-10', 'relaxed-11']
         return {"topology": {"format": "openff-topology-json", "data": "{}"}}
-
-    monkeypatch.setattr(api, "_build", fake_build)
-    monkeypatch.setattr(api, "_push_off", fake_push_off)
-    monkeypatch.setattr(api, "_pack", fake_pack)
-    response = api.handle_request(_request(
-        "build_push_off_pack",
-        {
-            "build": {"smiles": "*CC*", "units": 2, "seed": 10},
-            "chain_count": 2,
-            "push_off": {"steps": 10},
-            "pack": {"density": 0.3},
-        },
-    ))
-
-    assert response["ok"] is True
-    assert calls == ["build", "build", "push_off", "push_off", "pack"]
-    assert response["result"]["build"]["molecules"][1]["data"] == "chain-11"
-    assert response["result"]["push_off"]["molecules"][0]["data"] == "relaxed-chain-10"
+    monkeypatch.setattr(api, '_build', fake_build)
+    monkeypatch.setattr(api, '_pack', fake_pack)
+    response = api.handle_request(_request('build_push_off_pack', {
+        'build': {'smiles': '*CC*', 'units': 2, 'seed': 10}, 'chain_count': 2,
+        'push_off': {'steps': 10, 'seed': 20}, 'pack': {'density': 0.3},
+    }))
+    assert response['ok']
+    assert [c['push_off_options']['seed'] for c in calls] == [20, 21]
+    assert response['result']['build']['molecules'][1]['data'] == 'raw-11'
+    assert response['result']['push_off']['molecules'][0]['data'] == 'relaxed-10'
 
 
 def test_composed_action_names_failed_stage(monkeypatch):
-    monkeypatch.setattr(api, "_build", lambda payload: {"molecule": {"format": "mol", "data": "chain"}, "diagnostics": {}})
-
-    def fail_push_off(payload):
-        raise api.APIRequestError("DEPENDENCY_UNAVAILABLE", "OpenMM is missing")
-
-    monkeypatch.setattr(api, "_push_off", fail_push_off)
-    response = api.handle_request(_request(
-        "build_push_off_pack",
-        {"build": {"smiles": "*CC*", "units": 1}},
-    ))
-
-    assert response["ok"] is False
-    assert response["error"]["code"] == "PIPELINE_STAGE_FAILED"
-    assert "push_off stage failed" in response["error"]["message"]
+    def fail(payload):
+        raise api.APIRequestError('DEPENDENCY_UNAVAILABLE', 'OpenMM is missing')
+    monkeypatch.setattr(api, '_build', fail)
+    response = api.handle_request(_request('build_push_off_pack',
+                                           {'build': {'smiles': '*CC*', 'units': 1}}))
+    assert response['error']['code'] == 'PIPELINE_STAGE_FAILED'
+    assert 'build/push_off stage failed' in response['error']['message']
 
 
 def test_runner_handles_multiple_jsonl_requests_and_malformed_json(monkeypatch, capsys):

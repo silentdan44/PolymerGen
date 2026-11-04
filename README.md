@@ -32,21 +32,21 @@ docker run --rm polymer-generator python -m pytest -q
 
 ### Install the Python package from GitHub
 
-For Python use outside Docker, replace `<github-user>` and `<repository>` with the GitHub owner and repository name:
+First create and activate the conda-forge environment described below, then replace `<github-user>` and `<repository>` with the GitHub owner and repository name:
 
 ```bash
-python -m pip install "git+https://github.com/<github-user>/<repository>.git"
+python -m pip install --no-deps "git+https://github.com/<github-user>/<repository>.git"
 ```
 
-This installs the core Python package. The complete OpenFF/OpenMM pipeline is provided by Docker or the full local environment below.
+OpenFF and NAGL dependencies are most reliably installed with the conda-forge environment below. Chain generation requires that environment, including OpenMM and NAGL models.
 
 ### Local development with the full environment
 
-Install [micromamba](https://mamba.readthedocs.io/en/latest/user_guide/micromamba.html), then run from the repository root:
+Install [micromamba](https://mamba.readthedocs.io/en/latest/user_guide/micromamba.html), then run from the repository root. RDKit is pinned to 2024.09.6 because a chain-growth regression was observed with 2026.09.1:
 
 ```bash
 micromamba create -f environment.yml
-micromamba activate polymer-generator
+micromamba activate polymer_generator
 python -m pip install --no-deps --editable .
 python -m pytest -q
 ```
@@ -54,7 +54,7 @@ python -m pytest -q
 ## Quick Start
 ### Build a chain in one call
 
-`build_polymer` handles monomer creation, repeat expansion, and polymerization. The result carries the molecule and run diagnostics.
+`build_polymer` handles monomer creation, repeat expansion, polymerization, and push-off relaxation. The result carries the molecule and run diagnostics.
 
 ```python
 from polymer_lib import build_polymer
@@ -76,7 +76,8 @@ This section documents the public entry points and their return values. Distance
 ```python
 build_polymer(smiles, units=None, *, target_atoms=None, tacticity='atactic',
               tacticity_center=None,
-              optimizer='mmff', optimizer_options=None, config=None, seed=None)
+              optimizer='mmff', optimizer_options=None, config=None, seed=None,
+              push_off_options=None)
 ```
 
 Build a chain from one repeat-unit SMILES. The SMILES must contain exactly two `*` atoms for head and tail connection points. Specify either `units` (the repeat-unit count) or `target_atoms` (an approximate final atom count); target counts are rounded up to a whole number of repeat units.
@@ -91,7 +92,8 @@ Build a chain from one repeat-unit SMILES. The SMILES must contain exactly two `
 | `optimizer` | `'mmff'` by default; use `'openff'`, an optimizer object, or `None` to skip optimization. |
 | `optimizer_options` | Keyword arguments for a named optimizer, e.g. `{'max_iters': 1000}`. Must be a dictionary and requires a string optimizer name. |
 | `config` | Optional `BuildConfig` for geometry and retry settings. |
-| `seed` | Integer seed for both the initial conformer and random growth rotations; RDKit accepts 0 through 2³¹−1. |
+| `seed` | Integer seed for initial conformer, growth rotations and push-off unless overridden; RDKit accepts 0 through 2³¹−1. |
+| `push_off_options` | Optional dictionary of `push_off_chain` keyword arguments. |
 
 Returns `BuildResult`. Invalid SMILES, linkers, unit counts, or options raise exceptions. Exhausting retries returns a result with `success == False` and a `failure_reason`.
 
@@ -106,7 +108,7 @@ push_off_chain(mol, *, forcefield='openff-2.1.0.offxml', steps=1000,
                minimize=True, max_iters=200, tolerance=10.0)
 ```
 
-This is a separate relaxation step for a **completed, single polymer chain**. Run it after chain construction and before packing one or more chains into a box. It requires the optional OpenFF/OpenMM/NAGL environment. The function returns a **copy** of the input RDKit molecule with updated conformer coordinates; it does not mutate the input molecule.
+This relaxes a **completed, single polymer chain** and is automatically run by chain generation. It can also be called on an existing molecule. It requires OpenFF, OpenMM, and NAGL. The function returns a **copy** of the input RDKit molecule with updated conformer coordinates; it does not mutate the input molecule.
 
 The workflow is:
 
@@ -150,25 +152,16 @@ The soft-potential parameters are **not automatically fitted** to reproduce the 
 Setting `soft_minimize=False` skips the initial soft minimization. Setting `minimize=False` skips the final physical minimization and returns coordinates after soft dynamics; in that case, the physical interactions are still restored in the parameterized OpenMM system before it is discarded.
 
 ```python
-from polymer_lib import build_polymer, push_off_chain
+from polymer_lib import build_polymer
+from polymer_lib.packer import pack_chains
 
 result = build_polymer(
     '*CC(c1ccccc1)*', units=12, optimizer=None, seed=7,
+    push_off_options={'steps': 1000, 'stages': 10, 'amplitude': 25.0},
 )
 if not result.success:
     raise RuntimeError(result.failure_reason)
-
-relaxed_chain = push_off_chain(
-    result.molecule,
-    steps=1000,
-    stages=10,
-    amplitude=25.0,
-    seed=7,
-)
-
-# The packer accepts a list of relaxed RDKit molecules.
-from polymer_lib.packer import pack_chains
-topology = pack_chains([relaxed_chain], density=0.3)
+topology = pack_chains([result.molecule], density=0.3)
 ```
 
 ```python
@@ -252,7 +245,8 @@ Set `optimizer=None` to assemble and validate coordinates without force-field mi
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `molecule` | RDKit `Mol` or `None` | Built chain with 3D coordinates, or `None` after retry exhaustion. |
+| `molecule` | RDKit `Mol` or `None` | Relaxed chain, or `None` after retry exhaustion. |
+| `raw_molecule` | RDKit `Mol` or `None` | Chain coordinates before push-off, for diagnostics. |
 | `success` | `bool` property | True when `molecule` is present. |
 | `attempts` | `int` | Number of candidate connections tried across the run. |
 | `rollbacks` | `int` | Number of rollback/restart events. |
@@ -321,7 +315,7 @@ Polymerizer(
     random_rot=True, dist_min=1.8, retry=100, rollback=5,
     retry_step=200, check_bond_length=True,
     optimizer=None, optimizer_options=None, config=None, seed=None,
-    tacticity='atactic', tacticity_center=None,
+    tacticity='atactic', tacticity_center=None, push_off_options=None,
 )
 ```
 
@@ -333,7 +327,7 @@ Polymerizer(
 - **OpenFF:** `optimizer='openff'` or an `OpenFFOptimizer` object. Constructor defaults: `forcefield='openff-2.1.0.offxml'`, `max_iters=50`, platform `CPU`, tolerance `10.0 kJ/(mol·nm)`, and the installed default NAGL charge model. Install the full environment to use it.
 - **None:** assemble and validate coordinates without energy minimization.
 
-Use [`push_off_chain`](#push_off_chain) as an optional post-build step before packing. It performs overlap relaxation; it does not pack chains or replace full physical equilibration.
+Push-off is part of chain generation. It performs overlap relaxation; it does not pack chains or replace full physical equilibration.
 
 You can pass a configured optimizer instance instead of a string:
 
@@ -354,7 +348,7 @@ chains = [item.molecule for item in successful_results]
 topology = pack_chains(chains, density=0.3)
 ```
 
-For direct control, use `PackmolPacker(density=0.3, max_attempts=5, tolerance=2.0).pack(chains)`. Density is in g/mL; tolerance is in Å. Packing requires the OpenFF/Interchange/Packmol dependencies in the full environment.
+Before Packmol runs, the packer checks for severe non-local self-overlaps (excluding atoms connected by up to three bonds). It reports the chain and atom indices on failure. The threshold is half the mean of the van der Waals radii, so this is a severe-clash heuristic, not a complete physical validity test. It also computes a conservative cube from each chain bounding-box diagonal, the packing tolerance, and a 1 Å margin. If needed, it lowers the initial density and logs the chosen value; the conservative estimate can be lower than necessary for a particular orientation. For direct control, use `PackmolPacker(density=0.3, max_attempts=5, tolerance=2.0).pack(chains)` and inspect `packer.effective_density`. Density is in g/mL; tolerance is in Å. Packing requires the OpenFF/Interchange/Packmol dependencies in the full environment.
 
 ### JSON API and container runner
 
@@ -400,7 +394,7 @@ Supported actions:
 | `pack` | nonempty `molecules` array of coordinate-bearing MOL/SDF objects | OpenFF Topology JSON and PDB text with periodic box |
 | `build_push_off_pack` | nested `build` settings; optional `chain_count`, `push_off`, and `pack` objects | Build and relaxed chain structures plus the packed OpenFF Topology JSON and PDB |
 
-For `push_off`, additional input fields map to the corresponding `push_off_chain` keyword arguments (`steps`, `stages`, `temperature`, `seed`, `soft_minimize`, and others). For `pack`, optional inputs are `density` in g/mL, `max_attempts`, and `tolerance` in Å. A `build` result can be passed to `push_off`; its `result.molecule` value is already in the required MOL object format. A `pack` action takes an array of such molecules.
+For `push_off`, additional input fields map to the corresponding `push_off_chain` keyword arguments (`steps`, `stages`, `temperature`, `seed`, `soft_minimize`, and others). For `pack`, optional inputs are `density` in g/mL, `max_attempts`, and `tolerance` in Å. A `build` result is already relaxed; `push_off_options` configures that stage. The `pack` result includes `properties.initial_density_g_ml`. A `pack` action takes an array of such molecules.
 
 Use `build_push_off_pack` to run all three stages within one request. `chain_count` defaults to `1`; when multiple chains are requested, provided build and push-off seeds are incremented per chain to generate distinct reproducible trajectories. `push_off` and `pack` are option objects corresponding to the options of the standalone actions. Each stage's outputs are returned under `result.build`, `result.push_off`, and `result.pack`. If a stage fails, the response uses `PIPELINE_STAGE_FAILED` and names the stage in the error message.
 
@@ -449,13 +443,13 @@ from openff.interchange import Interchange
 from openff.nagl_models import list_available_nagl_models
 from openff.toolkit import ForceField, Molecule
 from openff.toolkit.utils.toolkits import GLOBAL_TOOLKIT_REGISTRY
-from polymer_lib import build_polymer, push_off_chain
+from polymer_lib import build_polymer
 
 result = build_polymer('*CC(c1ccccc1)*', units=12, optimizer=None, seed=7)
 if not result.success:
     raise RuntimeError(result.failure_reason)
 
-chain = push_off_chain(result.molecule, seed=7)
+chain = result.molecule
 
 # Parameterize the already-relaxed coordinates for the production system.
 try:
@@ -529,7 +523,7 @@ simulation.saveState('md_start/state_after_run.xml')
 From the repository root, activate the development environment and run:
 
 ```bash
-micromamba activate polymer-generator
+micromamba activate polymer_generator
 python -m pytest -q
 ```
 

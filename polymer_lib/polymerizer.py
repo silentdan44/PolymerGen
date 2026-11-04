@@ -82,7 +82,8 @@ class Polymerizer:
     def __init__(self, monomers, bond_length=1.5, dihedral=np.pi, random_rot=True,
                  dist_min=1.8, retry=100, rollback=5, retry_step=200,
                  check_bond_length=True, optimizer=None, optimizer_options=None,
-                 config=None, seed=None, tacticity='atactic', tacticity_center=None):
+                 config=None, seed=None, tacticity='atactic', tacticity_center=None,
+                 push_off_options=None):
         """
         Initialize the Polymerizer.
 
@@ -115,6 +116,9 @@ class Polymerizer:
             check_bond_length = config.check_bond_length
             tacticity = config.tacticity
             tacticity_center = config.tacticity_center
+        if push_off_options is not None and not isinstance(push_off_options, dict):
+            raise TypeError('push_off_options must be a dictionary')
+        self.push_off_options = dict(push_off_options or {})
         self.monomers = monomers
         self.n = len(monomers)
         self.bond_length = bond_length
@@ -190,7 +194,7 @@ class Polymerizer:
             return get_optimizer(name, **opts)
         raise ValueError(f"Invalid optimizer type: {type(optimizer)}")
 
-    def build_mol(self):
+    def _build_raw_mol(self):
         """
         Run the polymerization process and return the final polymer Mol.
 
@@ -473,12 +477,23 @@ class Polymerizer:
             atom_offset -= int(unit_idx < self.n - 1) + int(unit_idx > 0)
         return result
 
+    def build_mol(self):
+        """Build and relax a chain, returning its molecule or None."""
+        return self.build().molecule
+
     def build(self):
         """Build a chain and return a :class:`BuildResult` with status and stats."""
         started = time.time()
-        molecule = self.build_mol()
+        molecule = self._build_raw_mol()
+        raw_molecule = molecule
+        if molecule is not None:
+            from .push_off import push_off_chain
+            options = dict(self.push_off_options)
+            options.setdefault('seed', self.seed)
+            molecule = push_off_chain(molecule, **options)
         return BuildResult(
             molecule=molecule,
+            raw_molecule=raw_molecule,
             attempts=self._last_attempts,
             rollbacks=self._last_rollbacks,
             elapsed_seconds=time.time() - started,
@@ -495,6 +510,7 @@ class BuildResult:
     rollbacks: int
     elapsed_seconds: float
     failure_reason: str = None
+    raw_molecule: object = None
 
     @property
     def success(self):
@@ -503,7 +519,8 @@ class BuildResult:
 
 def build_polymer(smiles, units=_UNSET, *, target_atoms=_UNSET, tacticity='atactic',
                   tacticity_center=None,
-                  optimizer='mmff', optimizer_options=None, config=None, seed=None):
+                  optimizer='mmff', optimizer_options=None, config=None, seed=None,
+                  push_off_options=None):
     """Build a polymer by repeat count or approximate final atom count."""
     units_given = units is not _UNSET
     target_atoms_given = target_atoms is not _UNSET
@@ -528,6 +545,7 @@ def build_polymer(smiles, units=_UNSET, *, target_atoms=_UNSET, tacticity='atact
             seed=seed,
             tacticity=tacticity,
             tacticity_center=tacticity_center,
+            push_off_options=push_off_options,
         )
         return polymerizer.build()
     if not isinstance(units, int) or units < 1:
@@ -541,5 +559,6 @@ def build_polymer(smiles, units=_UNSET, *, target_atoms=_UNSET, tacticity='atact
         seed=seed,
         tacticity=tacticity,
         tacticity_center=tacticity_center,
+        push_off_options=push_off_options,
     )
     return polymerizer.build()

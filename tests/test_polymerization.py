@@ -7,6 +7,12 @@ from polymer_lib import BuildConfig, Monomer, Polymerizer, build_polymer
 from polymer_lib.poly import check_3d_bond_length, check_3d_structure_poly, connect_mols
 
 
+@pytest.fixture(autouse=True)
+def isolate_chain_growth_from_push_off(monkeypatch):
+    # The growth tests validate geometry and stereochemistry independently.
+    monkeypatch.setattr('polymer_lib.push_off.push_off_chain', lambda mol, **kwargs: mol)
+
+
 POLYSTYRENE = '*CC(c1ccccc1)*'
 
 
@@ -316,3 +322,16 @@ def test_sparse_contact_check_matches_expected_for_large_graph():
     assert check_3d_structure_poly(mol, mol, dist_min=1.8)
     mol.GetConformer().SetAtomPosition(atom_count - 1, Point3D(0.0, 0.0, 0.0))
     assert not check_3d_structure_poly(mol, mol, dist_min=1.8)
+
+
+def test_build_runs_push_off_once_with_options(monkeypatch):
+    calls = []
+    def relax(mol, **kwargs):
+        calls.append(kwargs)
+        return Chem.Mol(mol)
+    monkeypatch.setattr('polymer_lib.push_off.push_off_chain', relax)
+    result = build_polymer('*CC*', units=2, optimizer=None, seed=19,
+                           push_off_options={'steps': 4})
+    assert result.success
+    assert result.raw_molecule is not result.molecule
+    assert calls == [{'steps': 4, 'seed': 19}]

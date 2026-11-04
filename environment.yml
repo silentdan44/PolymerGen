@@ -1,10 +1,10 @@
-name: polymer-generator
+name: polymer_generator
 channels:
   - conda-forge
 dependencies:
   - python=3.11
   - pip
-  - rdkit>=2023.03
+  - rdkit=2024.09.6
   - numpy>=1.21
   - scipy>=1.7
   - numba>=0.57
