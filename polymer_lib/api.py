@@ -72,7 +72,7 @@ def _build(payload: dict) -> dict:
         payload,
         {
             "smiles", "units", "target_atoms", "tacticity", "tacticity_center",
-            "optimizer", "optimizer_options", "config", "seed", "push_off_options", "conformer_count",
+            "optimizer", "optimizer_options", "config", "seed", "push_off_options", "conformer_count", "restart_attempts",
         },
         "input",
     )
@@ -80,7 +80,7 @@ def _build(payload: dict) -> dict:
         raise APIRequestError("INVALID_INPUT", "input.smiles is required and must be a string")
     kwargs = {key: payload[key] for key in (
         "units", "target_atoms", "tacticity", "tacticity_center", "optimizer",
-        "optimizer_options", "seed", "push_off_options", "conformer_count",
+        "optimizer_options", "seed", "push_off_options", "conformer_count", "restart_attempts",
     ) if key in payload}
     if "config" in payload:
         if not isinstance(payload["config"], dict):
@@ -109,6 +109,7 @@ def _build(payload: dict) -> dict:
         "diagnostics": {
             "attempts": result.attempts,
             "rollbacks": result.rollbacks,
+            "restarts": getattr(result, "restarts", 0),
             "elapsed_seconds": result.elapsed_seconds,
         },
     }

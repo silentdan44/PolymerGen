@@ -30,6 +30,7 @@ class BuildConfig:
     retry_step: int = 200
     check_bond_length: bool = True
     conformer_count: int = 4
+    restart_attempts: int = 3
     tacticity: object = 'atactic'
     tacticity_center: int = None
 
@@ -40,6 +41,8 @@ class BuildConfig:
             raise ValueError('retry and rollback must be >= 0 and retry_step must be >= 1')
         if isinstance(self.conformer_count, bool) or not isinstance(self.conformer_count, int) or self.conformer_count < 1:
             raise ValueError('conformer_count must be a positive integer')
+        if isinstance(self.restart_attempts, bool) or not isinstance(self.restart_attempts, int) or self.restart_attempts < 0:
+            raise ValueError('restart_attempts must be a nonnegative integer')
         _validate_tacticity(self.tacticity)
         if not isinstance(self.tacticity, str):
             object.__setattr__(self, 'tacticity', tuple(self.tacticity))
@@ -86,7 +89,7 @@ class Polymerizer:
                  dist_min=1.8, retry=100, rollback=5, retry_step=200,
                  check_bond_length=True, optimizer=None, optimizer_options=None,
                  config=None, seed=None, tacticity='atactic', tacticity_center=None,
-                 push_off_options=None, conformer_count=4):
+                 push_off_options=None, conformer_count=4, restart_attempts=3):
         """
         Initialize the Polymerizer.
 
@@ -120,6 +123,7 @@ class Polymerizer:
             retry_step = config.retry_step
             check_bond_length = config.check_bond_length
             conformer_count = config.conformer_count
+            restart_attempts = config.restart_attempts
             tacticity = config.tacticity
             tacticity_center = config.tacticity_center
         if push_off_options is not None and not isinstance(push_off_options, dict):
@@ -139,6 +143,9 @@ class Polymerizer:
         if isinstance(conformer_count, bool) or not isinstance(conformer_count, int) or conformer_count < 1:
             raise ValueError('conformer_count must be a positive integer')
         self.conformer_count = conformer_count
+        if isinstance(restart_attempts, bool) or not isinstance(restart_attempts, int) or restart_attempts < 0:
+            raise ValueError('restart_attempts must be a nonnegative integer')
+        self.restart_attempts = restart_attempts
         _validate_tacticity(tacticity)
         self.tacticity = tacticity if isinstance(tacticity, str) else tuple(tacticity)
         if tacticity_center is not None and (
@@ -242,7 +249,7 @@ class Polymerizer:
         for index, xyz in enumerate(coordinates):
             conformer.SetAtomPosition(index, xyz.tolist())
 
-    def _build_raw_mol(self):
+    def _build_raw_mol(self, *, restart_initial=False):
         """
         Run the polymerization process and return the final polymer Mol.
 
@@ -266,6 +273,9 @@ class Polymerizer:
             logger.info(f'Optimizer: {self.optimizer.name}')
 
         poly_mol = utils.deepcopy_mol(self.monomers[0].mol)
+        if restart_initial:
+            pool = conformer_pools[0]
+            self._set_conformer_coordinates(poly_mol, pool[int(conformer_rng.integers(len(pool)))])
         poly_history = [utils.deepcopy_mol(poly_mol)]
         history_start_step = 0
         history_limit = self.rollback + 1
@@ -540,18 +550,41 @@ class Polymerizer:
     def build(self):
         """Build a chain and return a :class:`BuildResult` with status and stats."""
         started = time.time()
-        molecule = self._build_raw_mol()
+        original_seed = self.seed
+        seeds = np.random.default_rng(np.random.SeedSequence(original_seed).spawn(2)[1])
+        total_attempts = total_rollbacks = 0
+        restarts = 0
+        try:
+            for run in range(self.restart_attempts + 1):
+                if run:
+                    self.seed = int(seeds.integers(1, 2**31 - 1))
+                    logger.info('Restarting chain growth with a new reproducible seed')
+                molecule = self._build_raw_mol(restart_initial=(run > 0))
+                total_attempts += self._last_attempts
+                total_rollbacks += self._last_rollbacks
+                restarts = run
+                if molecule is not None:
+                    break
+        finally:
+            self.seed = original_seed
+        self._last_attempts = total_attempts
+        self._last_rollbacks = total_rollbacks
         raw_molecule = molecule
         if molecule is not None:
             from .push_off import push_off_chain
             options = dict(self.push_off_options)
-            options.setdefault('seed', self.seed)
+            options.setdefault('seed', original_seed)
             molecule = push_off_chain(molecule, **options)
+        elif self.restart_attempts:
+            self._last_failure_reason = (
+                f'{self._last_failure_reason}; exhausted {restarts} automatic restarts'
+            )
         return BuildResult(
             molecule=molecule,
             raw_molecule=raw_molecule,
-            attempts=self._last_attempts,
-            rollbacks=self._last_rollbacks,
+            attempts=total_attempts,
+            rollbacks=total_rollbacks,
+            restarts=restarts,
             elapsed_seconds=time.time() - started,
             failure_reason=self._last_failure_reason,
         )
@@ -567,6 +600,7 @@ class BuildResult:
     elapsed_seconds: float
     failure_reason: str = None
     raw_molecule: object = None
+    restarts: int = 0
 
     @property
     def success(self):
@@ -576,7 +610,7 @@ class BuildResult:
 def build_polymer(smiles, units=_UNSET, *, target_atoms=_UNSET, tacticity='atactic',
                   tacticity_center=None,
                   optimizer='mmff', optimizer_options=None, config=None, seed=None,
-                  push_off_options=None, conformer_count=4):
+                  push_off_options=None, conformer_count=4, restart_attempts=3):
     """Build a polymer by repeat count or approximate final atom count."""
     units_given = units is not _UNSET
     target_atoms_given = target_atoms is not _UNSET
@@ -603,6 +637,7 @@ def build_polymer(smiles, units=_UNSET, *, target_atoms=_UNSET, tacticity='atact
             tacticity_center=tacticity_center,
             push_off_options=push_off_options,
             conformer_count=conformer_count,
+            restart_attempts=restart_attempts,
         )
         return polymerizer.build()
     if not isinstance(units, int) or units < 1:
@@ -618,5 +653,6 @@ def build_polymer(smiles, units=_UNSET, *, target_atoms=_UNSET, tacticity='atact
         tacticity_center=tacticity_center,
         push_off_options=push_off_options,
         conformer_count=conformer_count,
+        restart_attempts=restart_attempts,
     )
     return polymerizer.build()
