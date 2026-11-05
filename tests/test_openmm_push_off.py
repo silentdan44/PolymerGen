@@ -24,6 +24,7 @@ def test_build_push_off_serialize_reload_and_continue_md(tmp_path):
     result = build_polymer(
         '*CC(c1ccccc1)*', units=2, optimizer=None,
         config=BuildConfig(retry=20, retry_step=100, rollback=2), seed=17,
+        push_off_options={"steps": 4, "stages": 2, "soft_minimize_max_iters": 5, "max_iters": 5},
     )
     assert result.success, result.failure_reason
     original_positions = np.array(result.molecule.GetConformer().GetPositions())
@@ -100,3 +101,19 @@ def test_build_push_off_serialize_reload_and_continue_md(tmp_path):
     )
     checkpoint_resume.loadCheckpoint(str(tmp_path / 'checkpoint.chk'))
     checkpoint_resume.step(1)
+
+
+def test_generate_and_pack_runs_push_off_once():
+    from polymer_lib.packer import PackmolPacker
+
+    result = build_polymer(
+        '*CC*', units=2, optimizer=None, seed=7,
+        push_off_options={'steps': 4, 'stages': 2,
+                          'soft_minimize_max_iters': 5, 'max_iters': 5},
+    )
+    assert result.success
+    assert result.raw_molecule is not result.molecule
+    packer = PackmolPacker(density=0.3, max_attempts=1)
+    topology = packer.pack([result.molecule])
+    assert topology.n_atoms == result.molecule.GetNumAtoms()
+    assert 0 < packer.effective_density <= 0.3

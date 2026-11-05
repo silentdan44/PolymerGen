@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+from collections import Counter, defaultdict
 import json
 import logging
 import re
@@ -72,7 +73,7 @@ def _build(payload: dict) -> dict:
         payload,
         {
             "smiles", "units", "target_atoms", "tacticity", "tacticity_center",
-            "optimizer", "optimizer_options", "config", "seed",
+            "optimizer", "optimizer_options", "config", "seed", "push_off_options", "conformer_count", "restart_attempts",
         },
         "input",
     )
@@ -80,7 +81,7 @@ def _build(payload: dict) -> dict:
         raise APIRequestError("INVALID_INPUT", "input.smiles is required and must be a string")
     kwargs = {key: payload[key] for key in (
         "units", "target_atoms", "tacticity", "tacticity_center", "optimizer",
-        "optimizer_options", "seed",
+        "optimizer_options", "seed", "push_off_options", "conformer_count", "restart_attempts",
     ) if key in payload}
     if "config" in payload:
         if not isinstance(payload["config"], dict):
@@ -100,6 +101,7 @@ def _build(payload: dict) -> dict:
     mol = result.molecule
     return {
         "molecule": _mol_output(mol),
+        "unrelaxed_molecule": _mol_output(result.raw_molecule) if getattr(result, "raw_molecule", None) is not None else _mol_output(mol),
         "properties": {
             "atoms": mol.GetNumAtoms(),
             "heavy_atoms": mol.GetNumHeavyAtoms(),
@@ -108,6 +110,7 @@ def _build(payload: dict) -> dict:
         "diagnostics": {
             "attempts": result.attempts,
             "rollbacks": result.rollbacks,
+            "restarts": getattr(result, "restarts", 0),
             "elapsed_seconds": result.elapsed_seconds,
         },
     }
@@ -139,23 +142,56 @@ def _push_off(payload: dict) -> dict:
     }
 
 
+def _write_pdb(topology, positions, output):
+    """Write OpenMM topology with normalized chain and residue identifiers."""
+    from openmm.app import PDBFile
+
+    # OpenFF may carry PDB residue numbers as integers; OpenMM expects strings
+    # when keepIds is enabled. This topology is a fresh OpenMM conversion.
+    for chain in topology.chains():
+        chain.id = str(chain.id)
+        for residue in chain.residues():
+            residue.id = str(residue.id)
+            atoms = list(residue.atoms())
+            names = [atom.name.strip()[:4] for atom in atoms]
+            counts = Counter(names)
+            used = {name for atom, name in zip(atoms, names)
+                    if name and len(atom.name.strip()) <= 4 and counts[name] == 1}
+            numbers = defaultdict(int)
+            alphabet = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+            for atom, name in zip(atoms, names):
+                if name and len(atom.name.strip()) <= 4 and counts[name] == 1:
+                    continue
+                prefix = atom.element.symbol[0].upper() if atom.element is not None else 'X'
+                while True:
+                    value = numbers[prefix]
+                    numbers[prefix] += 1
+                    if value >= 36**3:
+                        raise ValueError(f'Too many atoms with prefix {prefix} in one PDB residue')
+                    candidate = prefix + ''.join(alphabet[(value // place) % 36] for place in (1296, 36, 1))
+                    if candidate not in used:
+                        atom.name = candidate
+                        used.add(candidate)
+                        break
+    PDBFile.writeFile(topology, positions, output, keepIds=True)
+
+
 def _pack(payload: dict) -> dict:
-    _validate_keys(payload, {"molecules", "density", "max_attempts", "tolerance"}, "input")
+    _validate_keys(payload, {"molecules", "density", "max_attempts", "tolerance", "timeout", "seed"}, "input")
     molecules = payload.get("molecules")
     if not isinstance(molecules, list) or not molecules:
         raise APIRequestError("INVALID_INPUT", "input.molecules must be a nonempty list")
     mols = [_molecule_from_input(item, f"input.molecules[{i}]") for i, item in enumerate(molecules)]
-    options = {key: payload[key] for key in ("density", "max_attempts", "tolerance") if key in payload}
+    options = {key: payload[key] for key in ("density", "max_attempts", "tolerance", "timeout", "seed") if key in payload}
     try:
-        from .packer import pack_chains
+        from .packer import PackmolPacker
 
-        topology = pack_chains(mols, **options)
+        packer = PackmolPacker(**options)
+        topology = packer.pack(mols)
         openmm_topology = topology.to_openmm()
         positions = topology.get_positions().to_openmm()
-        from openmm.app import PDBFile
-
         pdb_file = io.StringIO()
-        PDBFile.writeFile(openmm_topology, positions, pdb_file, keepIds=True)
+        _write_pdb(openmm_topology, positions, pdb_file)
         topology_json = topology.to_json()
         # Validate that this OpenFF version emitted JSON before putting it on the wire.
         json.loads(topology_json)
@@ -163,10 +199,14 @@ def _pack(payload: dict) -> dict:
         raise APIRequestError("INVALID_INPUT", str(exc)) from exc
     except ImportError as exc:
         raise APIRequestError("DEPENDENCY_UNAVAILABLE", str(exc)) from exc
+    except RuntimeError as exc:
+        raise APIRequestError("PACKING_FAILED", str(exc)) from exc
     return {
         "topology": {"format": "openff-topology-json", "data": topology_json},
         "structure": {"format": "pdb", "data": pdb_file.getvalue()},
-        "properties": {"molecules": len(mols), "atoms": topology.n_atoms},
+        "properties": {"molecules": len(mols), "atoms": topology.n_atoms,
+                       "initial_density_g_ml": packer.effective_density,
+                       "packmol_density_g_ml": packer.initial_pack_density},
     }
 
 
@@ -190,6 +230,9 @@ def _build_push_off_pack(payload: dict) -> dict:
     if isinstance(chain_count, bool) or not isinstance(chain_count, int) or chain_count < 1:
         raise APIRequestError("INVALID_INPUT", "input.chain_count must be a positive integer")
 
+    if "push_off_options" in build_input:
+        raise APIRequestError("INVALID_INPUT", "Use input.push_off for pipeline push-off options")
+
     built = []
     try:
         for index in range(chain_count):
@@ -199,40 +242,27 @@ def _build_push_off_pack(payload: dict) -> dict:
                 if isinstance(seed, bool) or not isinstance(seed, int):
                     raise APIRequestError("INVALID_INPUT", "input.build.seed must be an integer or null")
                 chain_input["seed"] = (seed + index) % (2**31)
-            built.append(_build(chain_input))
-    except APIRequestError as exc:
-        raise APIRequestError(
-            "PIPELINE_STAGE_FAILED", f"build stage failed: {exc.code}: {exc}"
-        ) from exc
-    except Exception as exc:
-        logging.getLogger(__name__).exception("Unexpected failure in pipeline build stage")
-        raise APIRequestError(
-            "PIPELINE_STAGE_FAILED", "build stage failed: INTERNAL_ERROR; see runner stderr logs"
-        ) from exc
-
-    relaxed = []
-    try:
-        for index, item in enumerate(built):
             options = dict(push_off_options)
             seed = options.get("seed")
             if seed is not None and chain_count > 1:
                 if isinstance(seed, bool) or not isinstance(seed, int):
                     raise APIRequestError("INVALID_INPUT", "input.push_off.seed must be an integer or null")
                 options["seed"] = (seed + index) % (2**31)
-            relaxed.append(_push_off({"molecule": item["molecule"], **options}))
+            chain_input["push_off_options"] = options
+            built.append(_build(chain_input))
     except APIRequestError as exc:
         raise APIRequestError(
-            "PIPELINE_STAGE_FAILED", f"push_off stage failed: {exc.code}: {exc}"
+            "PIPELINE_STAGE_FAILED", f"build/push_off stage failed: {exc.code}: {exc}"
         ) from exc
     except Exception as exc:
-        logging.getLogger(__name__).exception("Unexpected failure in pipeline push_off stage")
+        logging.getLogger(__name__).exception("Unexpected failure in pipeline build/push_off stage")
         raise APIRequestError(
-            "PIPELINE_STAGE_FAILED", "push_off stage failed: INTERNAL_ERROR; see runner stderr logs"
+            "PIPELINE_STAGE_FAILED", "build/push_off stage failed: INTERNAL_ERROR; see runner stderr logs"
         ) from exc
 
     try:
         packed = _pack({
-            "molecules": [item["molecule"] for item in relaxed],
+            "molecules": [item["molecule"] for item in built],
             **pack_options,
         })
     except APIRequestError as exc:
@@ -247,10 +277,10 @@ def _build_push_off_pack(payload: dict) -> dict:
 
     return {
         "build": {
-            "molecules": [item["molecule"] for item in built],
+            "molecules": [item["unrelaxed_molecule"] for item in built],
             "diagnostics": [item["diagnostics"] for item in built],
         },
-        "push_off": {"molecules": [item["molecule"] for item in relaxed]},
+        "push_off": {"molecules": [item["molecule"] for item in built]},
         "pack": packed,
     }
 

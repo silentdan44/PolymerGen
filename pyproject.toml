@@ -6,20 +6,20 @@ description = "Simple polymer chain generator using OpenFF and OpenMM"
 requires-python = ">=3.9"
 
 dependencies = [
-    "rdkit>=2023.03",              
+    "rdkit==2024.9.6",
     "numpy>=1.21",
     "scipy>=1.7",
     "numba>=0.57",
     "tqdm>=4.62",
+    "openff-toolkit>=0.15.0",
+    "openff-units>=0.2.0",
+    "openff-interchange>=0.4",
+    "openff-nagl",
+    "openff-nagl-models",
+    "openmm>=8.0",
 ]
 
 [project.optional-dependencies]
-openff = [
-    "openff-toolkit>=0.15.0",
-    "openff-units>=0.2.0",
-    "openff-utilities>=0.1.10",
-    "openmm>=8.0",
-]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
