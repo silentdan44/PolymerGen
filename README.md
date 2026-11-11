@@ -243,7 +243,7 @@ chain = build_polymer(
 )
 ```
 
-Set `optimizer=None` to assemble and validate coordinates without force-field minimization. This is faster, but it does not relax the geometry energetically.
+Set `optimizer=None` to skip force-field minimization during chain growth. Successful builds still receive the final chain push-off described below; it is overlap relaxation, not full physical equilibration.
 
 ### `BuildResult`
 
