@@ -243,7 +243,7 @@ chain = build_polymer(
 )
 ```
 
-Set `optimizer=None` to assemble and validate coordinates without force-field minimization. This is faster, but it does not relax the geometry energetically.
+Set `optimizer=None` to skip force-field minimization during chain growth. Successful builds still receive the final chain push-off described below; it is overlap relaxation, not full physical equilibration.
 
 ### `BuildResult`
 
@@ -333,7 +333,21 @@ Polymerizer(
 
 - **MMFF94s:** `optimizer='mmff'`. Defaults: `max_iters=1000`, `variant='MMFF94s'`, `non_bonded_thresh=3.0 Å`. Example options: `optimizer_options={'max_iters': 1500, 'variant': 'MMFF94'}`. Nonconvergence rejects that candidate and invokes retry logic.
 - **OpenFF:** `optimizer='openff'` or an `OpenFFOptimizer` object. Constructor defaults: `forcefield='openff-2.1.0.offxml'`, `max_iters=50`, platform `CPU`, tolerance `10.0 kJ/(mol·nm)`, and the installed default NAGL charge model. Install the full environment to use it.
-- **None:** assemble and validate coordinates without energy minimization.
+- **None:** assemble and validate coordinates without energy minimization at each growth step. `build()` still runs the final chain push-off stage.
+
+To skip per-step geometry optimization and apply only the final push-off:
+
+```python
+result = build_polymer(
+    '*CC(c1ccccc1)*',
+    units=12,
+    optimizer=None,
+    seed=7,
+    push_off_options={'steps': 1000, 'stages': 10},
+)
+```
+
+The final push-off is enabled by default for successful builds; `push_off_options` tunes it. It requires the OpenFF/Interchange/NAGL/OpenMM dependencies.
 
 Push-off is part of chain generation. It performs overlap relaxation; it does not pack chains or replace full physical equilibration.
 
@@ -356,7 +370,7 @@ chains = [item.molecule for item in successful_results]
 topology = pack_chains(chains, density=0.3)
 ```
 
-Before Packmol runs, the packer checks for severe non-local self-overlaps (excluding atoms connected by up to three bonds). It reports the chain and atom indices on failure. The threshold is half the mean of the van der Waals radii, so this is a severe-clash heuristic, not a complete physical validity test. It also computes a conservative cube from each chain bounding-box diagonal, the packing tolerance, and a 1 Å margin. If needed, it lowers the initial density and logs the chosen value; the conservative estimate can be lower than necessary for a particular orientation. For systems of at least 1000 atoms with an effective target density above 0.05 g/mL, Packmol first packs the chains at 0.05 g/mL. The box is then gradually compressed to the effective target density, moving and rotating each chain as a rigid body while removing inter-chain overlaps under periodic boundaries. This is geometric packing, not force-field minimization or physical equilibration. For direct control, use `PackmolPacker(density=0.3, max_attempts=5, tolerance=2.0, timeout=60, seed=None).pack(chains)` and inspect `packer.initial_pack_density` and `packer.effective_density`. Density is in g/mL; tolerance is in Å. Each Packmol attempt runs in an isolated process with its own seed and a `timeout` in seconds (default 60); if an attempt times out, it and its child processes are terminated. The final target density remains fixed across retries. Compression is also bounded by the same timeout per attempt; failures report the effective target density. Set `seed` for reproducible retry seeds and increase `timeout` for harder cases. This limits waiting but does not guarantee packing success. Packing requires the OpenFF/Interchange/Packmol dependencies in the full environment.
+Before Packmol runs, the packer checks for severe non-local self-overlaps (excluding atoms connected by up to three bonds). It reports the chain and atom indices on failure. The threshold is half the mean of the van der Waals radii, so this is a severe-clash heuristic, not a complete physical validity test. It estimates a conservative starting density from chain dimensions. For systems of at least 1000 atoms, it may pack dilute and gradually compress the full periodic box while moving and rotating chains as rigid bodies. If Packmol or box compression fails, it retries at progressively lower densities, then creates a randomized periodic lattice with guaranteed clearance and attempts a whole-box rigid-body push-off toward the target density. If that final compression cannot reach the target, the safe lower-density system is returned; inspect `packer.effective_density` for the actual density. This is geometric packing, not force-field minimization or physical equilibration. For direct control, use `PackmolPacker(density=0.3, max_attempts=5, tolerance=2.0, timeout=60, seed=None).pack(chains)` and inspect `packer.initial_pack_density` and `packer.effective_density`. Density is in g/mL; tolerance is in Å. Each Packmol attempt runs in an isolated process with its own seed and a `timeout` in seconds (default 60); if an attempt times out, it and its child processes are terminated. The full route requires OpenFF/Interchange/Packmol dependencies; the randomized periodic fallback still requires OpenFF Toolkit.
 
 ### JSON API and container runner
 

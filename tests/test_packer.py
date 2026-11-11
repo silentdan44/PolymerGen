@@ -87,14 +87,17 @@ def test_packmol_timeout_retries_with_new_reproducible_seeds(monkeypatch):
     assert seeds[:3] == seeds[3:]
 
 
-def test_exhausted_packmol_timeout_reports_density(monkeypatch):
+def test_exhausted_packmol_timeout_uses_periodic_fallback(monkeypatch):
     import subprocess
     mol = molecule('CC')
     def attempt(*args):
         raise subprocess.TimeoutExpired('packmol', 0.1)
     monkeypatch.setattr('polymer_lib.packer._run_packmol_attempt', attempt)
-    with pytest.raises(RuntimeError, match='2 attempts.*timeout 0.1 s'):
-        PackmolPacker(max_attempts=2, timeout=0.1).pack([mol])
+    packer = PackmolPacker(max_attempts=2, timeout=0.1, seed=10)
+    topology = packer.pack([mol])
+    assert topology.n_atoms == mol.GetNumAtoms()
+    assert np.isfinite(topology.get_positions().m).all()
+    assert 0 < packer.effective_density
 
 
 def test_large_dense_box_packs_dilute_then_compresses_to_target(monkeypatch):
@@ -134,3 +137,25 @@ def test_real_worker_timeout_is_bounded():
     mol = Molecule.from_rdkit(molecule('CC'))
     with pytest.raises(subprocess.TimeoutExpired):
         _run_packmol_attempt([mol], 0.1, 2.0, 42, 0.01, False)
+
+
+def test_packmol_exhaustion_returns_safe_random_periodic_fallback(monkeypatch):
+    mol = molecule('CC')
+    monkeypatch.setattr(
+        'polymer_lib.packer._run_packmol_attempt',
+        lambda *args: (_ for _ in ()).throw(RuntimeError('simulated Packmol failure')),
+    )
+    monkeypatch.setattr(
+        'polymer_lib._rigid_compression.compress_topology',
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError('simulated box push-off failure')),
+    )
+    packer = PackmolPacker(density=0.3, max_attempts=1, timeout=0.01, seed=11)
+    topology = packer.pack([mol, molecule('CC')])
+    coords = topology.get_positions().m_as(unit.angstrom)
+    box = topology.box_vectors.m_as(unit.angstrom)
+
+    assert topology.n_atoms == 2 * mol.GetNumAtoms()
+    assert np.isfinite(coords).all()
+    assert np.allclose(box, np.eye(3) * box[0, 0])
+    assert 0 < packer.effective_density < 0.3
+    assert packer.initial_pack_density == pytest.approx(packer.effective_density)

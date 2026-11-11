@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 from rdkit import Chem
 from scipy.spatial import cKDTree
+from scipy.spatial.transform import Rotation
 from openff.toolkit import Molecule, Topology
 from openff.units import unit
 
@@ -154,35 +155,120 @@ class PackmolPacker:
                         self.initial_pack_density, self.effective_density)
         rng = np.random.default_rng(self.seed)
         last_error = None
-        for attempt in range(1, self.max_attempts + 1):
-            attempt_seed = int(rng.integers(1, 2**31 - 1))
-            logger.info("Packmol attempt %d/%d: seed=%d, disable_movebad=%s",
-                        attempt, self.max_attempts, attempt_seed, attempt % 2 == 0)
-            try:
-                topology = _run_packmol_attempt(
-                    molecules, self.initial_pack_density,
-                    self.tolerance.m_as(unit.angstrom), attempt_seed, self.timeout,
-                    attempt % 2 == 0,
+        # Keep the requested density as the first choice, then give Packmol
+        # progressively more room. A bad target density must not prevent a
+        # valid, lower-density periodic system from being returned.
+        densities = [self.initial_pack_density]
+        for _ in range(4):
+            next_density = densities[-1] * 0.65
+            if next_density < 1e-4:
+                break
+            densities.append(next_density)
+
+        for density_index, density in enumerate(densities):
+            attempts = self.max_attempts if density_index == 0 else min(2, self.max_attempts)
+            for attempt in range(1, attempts + 1):
+                attempt_seed = int(rng.integers(1, 2**31 - 1))
+                logger.info(
+                    "Packmol attempt %d/%d at %.6g g/mL: seed=%d, disable_movebad=%s",
+                    attempt, attempts, density, attempt_seed, attempt % 2 == 0,
                 )
-                if use_compression:
-                    from ._rigid_compression import compress_topology
-                    topology = compress_topology(
-                        topology, chains, self.initial_pack_density, self.effective_density,
-                        self.tolerance.m_as(unit.angstrom), seed=attempt_seed, timeout=self.timeout,
+                try:
+                    topology = _run_packmol_attempt(
+                        molecules, density,
+                        self.tolerance.m_as(unit.angstrom), attempt_seed, self.timeout,
+                        attempt % 2 == 0,
                     )
-                return topology
-            except (subprocess.TimeoutExpired, TimeoutError, RuntimeError) as exc:
-                last_error = exc
-                logger.warning("Packing attempt %d/%d failed at target %.6g g/mL: %s",
-                               attempt, self.max_attempts, self.effective_density, exc)
-        raise RuntimeError(
-            f"Packing failed after {self.max_attempts} attempts at target density "
-            f"{self.effective_density:.6g} g/mL (timeout {self.timeout:g} s per attempt): "
-            f"{last_error}. Try a lower initial density or a longer timeout."
-        ) from last_error
+                    if use_compression:
+                        from ._rigid_compression import compress_topology
+                        topology = compress_topology(
+                            topology, chains, density, self.effective_density,
+                            self.tolerance.m_as(unit.angstrom), seed=attempt_seed,
+                            timeout=self.timeout,
+                        )
+                    else:
+                        self.effective_density = density
+                    self.initial_pack_density = density
+                    return topology
+                except Exception as exc:
+                    # Packmol, subprocess startup, and rigid-box compression
+                    # failures all enter the same bounded fallback ladder.
+                    last_error = exc
+                    logger.warning("Packing attempt failed at %.6g g/mL: %s", density, exc)
+
+        # Last resort: randomized periodic placement, then rigid-body push-off
+        # over the complete box. If compression cannot reach the requested
+        # density, keep the clash-free dilute periodic system.
+        topology, safe_density = _random_periodic_pack(
+            molecules, chains, extents, self.tolerance.m_as(unit.angstrom),
+            seed=int(rng.integers(1, 2**31 - 1)),
+        )
+        if safe_density > self.effective_density:
+            scale = (safe_density / self.effective_density) ** (1.0 / 3.0)
+            topology, safe_density = _random_periodic_pack(
+                molecules, chains, extents, self.tolerance.m_as(unit.angstrom),
+                seed=int(rng.integers(1, 2**31 - 1)), scale=scale,
+            )
+            self.initial_pack_density = safe_density
+            self.effective_density = safe_density
+            return topology
+        try:
+            from ._rigid_compression import compress_topology
+            pushed = compress_topology(
+                topology, chains, safe_density, self.effective_density,
+                self.tolerance.m_as(unit.angstrom),
+                seed=int(rng.integers(1, 2**31 - 1)), timeout=max(self.timeout, 30.0),
+            )
+            self.initial_pack_density = self.effective_density
+            return pushed
+        except Exception as exc:
+            logger.warning(
+                "Whole-box push-off could not reach %.6g g/mL; returning safe "
+                "random periodic packing at %.6g g/mL (last packing error: %s; push-off: %s)",
+                self.effective_density, safe_density, last_error, exc,
+            )
+            self.initial_pack_density = safe_density
+            self.effective_density = safe_density
+            return topology
 
 
 def pack_chains(chains, density=0.3, max_attempts=5, tolerance=2.0, timeout=60.0, seed=None):
     """Pack RDKit polymer chains and return an OpenFF topology."""
     return PackmolPacker(density=density, max_attempts=max_attempts, tolerance=tolerance,
                          timeout=timeout, seed=seed).pack(chains)
+
+
+def _random_periodic_pack(molecules, chains, extents, tolerance, *, seed, scale=1.0):
+    """Place rigid chains in randomized periodic lattice cells with guaranteed clearance."""
+    from openff.toolkit import Topology
+
+    count = len(chains)
+    grid = int(math.ceil(count ** (1.0 / 3.0)))
+    # Each chain fits inside a sphere whose radius is bounded by its box
+    # diagonal. Separate cell centers by more than two radii plus tolerance.
+    spacing = (2.0 * max(extents) + tolerance + 1.0) * scale
+    side = grid * spacing
+    rng = np.random.default_rng(seed)
+    cells = np.array(
+        [(i, j, k) for i in range(grid) for j in range(grid) for k in range(grid)],
+        dtype=float,
+    )[:count]
+    cells = cells[rng.permutation(count)]
+    blocks = []
+    for molecule, cell in zip(chains, cells):
+        coords = np.asarray(molecule.GetConformer().GetPositions(), dtype=float)
+        centered = coords - coords.mean(axis=0)
+        rotation = Rotation.random(random_state=rng).as_matrix()
+        center = (cell + 0.5) * spacing
+        blocks.append(centered @ rotation.T + center)
+    positions = np.concatenate(blocks, axis=0)
+    topology = Topology.from_molecules(molecules)
+    topology.set_positions(positions * unit.angstrom)
+    topology.box_vectors = np.eye(3) * side * unit.angstrom
+    mass = sum(atom.mass.m_as(unit.dalton) for mol in molecules for atom in mol.atoms)
+    density = mass * 1.66053906660 / side**3
+    logger.warning(
+        "Using randomized whole-box periodic fallback: density %.6g g/mL, box side %.3f Å",
+        density, side,
+    )
+    return topology, density
